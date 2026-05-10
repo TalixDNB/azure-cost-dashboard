@@ -1,0 +1,526 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>Azure Cost Dashboard</title>
+  <script src="https://cdnjs.cloudflare.com/ajax/libs/react/18.2.0/umd/react.production.min.js"></script>
+  <script src="https://cdnjs.cloudflare.com/ajax/libs/react-dom/18.2.0/umd/react-dom.production.min.js"></script>
+  <script src="https://cdnjs.cloudflare.com/ajax/libs/babel-standalone/7.23.5/babel.min.js"></script>
+  <script src="https://cdnjs.cloudflare.com/ajax/libs/recharts/2.12.7/Recharts.min.js"></script>
+  <script src="https://cdn.tailwindcss.com"></script>
+  <style>
+    body { margin: 0; font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', sans-serif; }
+    .spin { animation: spin 1s linear infinite; }
+    @keyframes spin { from { transform: rotate(0deg); } to { transform: rotate(360deg); } }
+  </style>
+</head>
+<body>
+  <div id="root"></div>
+
+  <script type="text/babel">
+    const { useState, useEffect, useCallback, useRef } = React;
+
+    // =========================================================================
+    // CONFIG
+    // =========================================================================
+    const CLIENT_ID   = "dcdf39df-efdf-4f55-96fb-c24f4f9111ac";
+    const TENANT      = "460bc2b5-594c-44eb-8930-8d13538d7f0e";
+    const SCOPES      = "https://management.azure.com/user_impersonation offline_access openid profile";
+    const AUTH_EP     = `https://login.microsoftonline.com/${TENANT}/oauth2/v2.0/authorize`;
+    const TOKEN_EP    = `https://login.microsoftonline.com/${TENANT}/oauth2/v2.0/token`;
+    const ARM_BASE    = "https://management.azure.com";
+    const REDIRECT_URI = "https://talixdnb.github.io/azure-cost-dashboard/";
+
+    // =========================================================================
+    // PKCE
+    // =========================================================================
+    const b64url = buf =>
+      btoa(String.fromCharCode(...new Uint8Array(buf)))
+        .replace(/\+/g,"-").replace(/\//g,"_").replace(/=+$/,"");
+
+    const randBytes = n => { const a = new Uint8Array(n); crypto.getRandomValues(a); return a; };
+
+    const makePkce = async () => {
+      const verifier  = b64url(randBytes(64).buffer);
+      const challenge = b64url(await crypto.subtle.digest("SHA-256", new TextEncoder().encode(verifier)));
+      return { verifier, challenge };
+    };
+
+    // =========================================================================
+    // Storage — localStorage with in-memory fallback
+    // =========================================================================
+    const mem = {};
+    const kv = {
+      get(k)    { try { return localStorage.getItem(k); } catch { return mem[k] ?? null; } },
+      set(k, v) { const s = typeof v === "string" ? v : JSON.stringify(v);
+                  try { localStorage.setItem(k, s); } catch { mem[k] = s; } },
+      del(k)    { try { localStorage.removeItem(k); } catch { delete mem[k]; } }
+    };
+
+    // =========================================================================
+    // Auth helpers
+    // =========================================================================
+    function buildAuthUrl(challenge, state) {
+      return `${AUTH_EP}?${new URLSearchParams({
+        client_id: CLIENT_ID, response_type: "code",
+        redirect_uri: REDIRECT_URI, scope: SCOPES,
+        response_mode: "query", code_challenge: challenge,
+        code_challenge_method: "S256", state, prompt: "select_account"
+      })}`;
+    }
+
+    async function exchangeCode(code, verifier) {
+      const res = await fetch(TOKEN_EP, {
+        method: "POST",
+        headers: { "Content-Type": "application/x-www-form-urlencoded" },
+        body: new URLSearchParams({
+          grant_type: "authorization_code", client_id: CLIENT_ID,
+          code, redirect_uri: REDIRECT_URI, code_verifier: verifier
+        })
+      });
+      const json = await res.json();
+      if (!res.ok) throw new Error(json.error_description || json.error || `Token exchange failed: ${res.status}`);
+      return json;
+    }
+
+    async function doRefresh(rt) {
+      const res = await fetch(TOKEN_EP, {
+        method: "POST",
+        headers: { "Content-Type": "application/x-www-form-urlencoded" },
+        body: new URLSearchParams({
+          grant_type: "refresh_token", client_id: CLIENT_ID,
+          refresh_token: rt, scope: SCOPES
+        })
+      });
+      const json = await res.json();
+      if (!res.ok) throw new Error(json.error_description || json.error || "Refresh failed");
+      return json;
+    }
+
+    function makeToken(resp, fallbackRt) {
+      return {
+        access_token:  resp.access_token,
+        refresh_token: resp.refresh_token || fallbackRt,
+        expires_at:    Date.now() + (resp.expires_in - 60) * 1000
+      };
+    }
+
+    // =========================================================================
+    // ARM
+    // =========================================================================
+    async function armGet(path, at) {
+      const res = await fetch(`${ARM_BASE}${path}`, {
+        headers: { Authorization: `Bearer ${at}` }
+      });
+      if (res.status === 401) throw new Error("TOKEN_EXPIRED");
+      if (!res.ok) { const t = await res.text(); throw new Error(`${res.status}: ${t}`); }
+      return res.json();
+    }
+
+    async function listSubs(at) {
+      const j = await armGet("/subscriptions?api-version=2022-12-01", at);
+      return (j.value || [])
+        .map(s => ({ id: s.subscriptionId, name: s.displayName, state: s.state }))
+        .sort((a, b) => a.name.localeCompare(b.name));
+    }
+
+    // =========================================================================
+    // UI primitives
+    // =========================================================================
+    const cx = (...a) => a.filter(Boolean).join(" ");
+
+    function Spinner({ size = 20, className = "" }) {
+      return (
+        <svg className={cx("spin", className)} width={size} height={size} viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2">
+          <path d="M12 2v4M12 18v4M4.93 4.93l2.83 2.83M16.24 16.24l2.83 2.83M2 12h4M18 12h4M4.93 19.07l2.83-2.83M16.24 7.76l2.83-2.83" strokeLinecap="round"/>
+        </svg>
+      );
+    }
+
+    function Icon({ d, size = 18, className = "" }) {
+      return (
+        <svg width={size} height={size} viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round" className={className}>
+          <path d={d} />
+        </svg>
+      );
+    }
+
+    // Common icon paths
+    const ICONS = {
+      cloud:    "M18 10h-1.26A8 8 0 1 0 9 20h9a5 5 0 0 0 0-10z",
+      login:    "M15 3h4a2 2 0 0 1 2 2v14a2 2 0 0 1-2 2h-4M10 17l5-5-5-5M15 12H3",
+      logout:   "M9 21H5a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h4M16 17l5-5-5-5M21 12H9",
+      check:    "M20 6L9 17l-5-5",
+      alert:    "M10.29 3.86L1.82 18a2 2 0 0 0 1.71 3h16.94a2 2 0 0 0 1.71-3L13.71 3.86a2 2 0 0 0-3.42 0zM12 9v4M12 17h.01",
+      chevron:  "M9 18l6-6-6-6",
+      refresh:  "M23 4v6h-6M1 20v-6h6M3.51 9a9 9 0 0 1 14.85-3.36L23 10M1 14l4.64 4.36A9 9 0 0 0 20.49 15",
+      copy:     "M8 4H6a2 2 0 0 0-2 2v12a2 2 0 0 0 2 2h8a2 2 0 0 0 2-2v-2M16 4h2a2 2 0 0 1 2 2v4M12 2h4v4h-4z",
+      external: "M18 13v6a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2V8a2 2 0 0 1 2-2h6M15 3h6v6M10 14L21 3",
+      filter:   "M22 3H2l8 9.46V19l4 2v-8.54L22 3",
+      bar:      "M12 20V10M18 20V4M6 20v-4",
+      trend:    "M23 6l-9.5 9.5-5-5L1 18",
+    };
+
+    function Btn({ children, onClick, variant = "primary", disabled, full, className = "" }) {
+      const v = {
+        primary:   "bg-blue-600 text-white hover:bg-blue-700 shadow-sm",
+        secondary: "bg-white border border-slate-200 text-slate-700 hover:bg-slate-50 shadow-sm",
+        ghost:     "text-slate-500 hover:text-slate-700 hover:bg-slate-100",
+      };
+      return (
+        <button onClick={onClick} disabled={disabled}
+          className={cx(
+            "inline-flex items-center justify-center gap-2 rounded-lg px-4 py-2.5 text-sm font-medium transition-all",
+            "disabled:opacity-40 disabled:cursor-not-allowed select-none",
+            v[variant], full && "w-full", className
+          )}>
+          {children}
+        </button>
+      );
+    }
+
+    function Card({ children, className = "" }) {
+      return <div className={cx("bg-white rounded-xl border border-slate-200 shadow-sm", className)}>{children}</div>;
+    }
+
+    function ErrBox({ msg }) {
+      if (!msg) return null;
+      return (
+        <div className="flex gap-2 items-start p-3.5 rounded-lg bg-red-50 border border-red-200 text-sm text-red-800">
+          <Icon d={ICONS.alert} size={15} className="flex-shrink-0 mt-0.5 text-red-500" />
+          <span>{msg}</span>
+        </div>
+      );
+    }
+
+    // =========================================================================
+    // Sign-in screen
+    // =========================================================================
+    function SignInScreen({ onSignIn, busy, error }) {
+      return (
+        <div className="min-h-screen bg-gradient-to-br from-slate-50 to-blue-50 flex items-center justify-center p-6">
+          <div className="w-full max-w-sm space-y-5">
+            <div className="text-center space-y-3">
+              <div className="inline-flex items-center justify-center w-16 h-16 rounded-2xl bg-blue-600 shadow-lg">
+                <Icon d={ICONS.cloud} size={30} className="text-white" />
+              </div>
+              <div>
+                <h1 className="text-2xl font-bold text-slate-900 tracking-tight">Azure Cost Dashboard</h1>
+                <p className="text-slate-500 text-sm mt-1">Personal read-only cost tracking</p>
+              </div>
+            </div>
+
+            <Card className="p-6 space-y-4">
+              <Btn full onClick={onSignIn} disabled={busy}>
+                {busy
+                  ? <Spinner size={16} className="text-white" />
+                  : <Icon d={ICONS.login} size={16} />}
+                Sign in with Microsoft
+              </Btn>
+              <ErrBox msg={error} />
+              <p className="text-xs text-slate-400 text-center leading-relaxed">
+                You'll be redirected to Microsoft to sign in. Read-only access only — we cannot make any changes to your Azure resources.
+              </p>
+            </Card>
+
+            <p className="text-xs text-slate-400 text-center">
+              Redirect URI: <code className="text-slate-500">{REDIRECT_URI}</code>
+            </p>
+          </div>
+        </div>
+      );
+    }
+
+    // =========================================================================
+    // Subscription picker
+    // =========================================================================
+    function SubPicker({ subs, selected, onToggle, onSelectAll, onContinue, onSignOut, loading }) {
+      const allOn = subs.length > 0 && selected.size === subs.length;
+      return (
+        <div className="min-h-screen bg-gradient-to-br from-slate-50 to-blue-50 flex items-center justify-center p-6">
+          <div className="w-full max-w-lg space-y-4">
+            <div className="text-center">
+              <h2 className="text-xl font-bold text-slate-900">Choose subscriptions</h2>
+              <p className="text-slate-500 text-sm mt-1">Select which to include in the dashboard</p>
+            </div>
+            <Card>
+              <div className="px-4 py-3 border-b border-slate-100 flex items-center justify-between">
+                <span className="text-xs font-medium text-slate-400 uppercase tracking-wide">
+                  {loading ? "Loading…" : `${subs.length} found`}
+                </span>
+                {subs.length > 0 && (
+                  <button onClick={onSelectAll} className="text-xs text-blue-600 hover:text-blue-700 font-medium">
+                    {allOn ? "Deselect all" : "Select all"}
+                  </button>
+                )}
+              </div>
+
+              <div className="divide-y divide-slate-100 max-h-80 overflow-y-auto">
+                {loading && (
+                  <div className="flex items-center justify-center py-10">
+                    <Spinner className="text-slate-300" />
+                  </div>
+                )}
+                {!loading && subs.length === 0 && (
+                  <p className="text-center py-10 text-sm text-slate-400">No subscriptions found.</p>
+                )}
+                {!loading && subs.map(s => {
+                  const on = selected.has(s.id);
+                  return (
+                    <button key={s.id} onClick={() => onToggle(s.id)}
+                      className="w-full flex items-center gap-3 px-4 py-3 text-left hover:bg-slate-50 transition-colors">
+                      <div className={cx(
+                        "w-5 h-5 rounded border-2 flex items-center justify-center flex-shrink-0 transition-colors",
+                        on ? "bg-blue-600 border-blue-600" : "border-slate-300 bg-white"
+                      )}>
+                        {on && <Icon d={ICONS.check} size={11} className="text-white" />}
+                      </div>
+                      <div className="flex-1 min-w-0">
+                        <div className="text-sm font-medium text-slate-900 truncate">{s.name}</div>
+                        <div className="text-xs text-slate-400 font-mono truncate">{s.id}</div>
+                      </div>
+                      <span className={cx(
+                        "text-xs px-2 py-0.5 rounded-full font-medium flex-shrink-0",
+                        s.state === "Enabled" ? "bg-emerald-100 text-emerald-700" : "bg-slate-100 text-slate-500"
+                      )}>
+                        {s.state}
+                      </span>
+                    </button>
+                  );
+                })}
+              </div>
+
+              <div className="px-4 py-3 border-t border-slate-100 flex items-center justify-between">
+                <Btn variant="ghost" onClick={onSignOut}>
+                  <Icon d={ICONS.logout} size={14} /> Sign out
+                </Btn>
+                <Btn onClick={onContinue} disabled={selected.size === 0}>
+                  Open dashboard <Icon d={ICONS.chevron} size={14} />
+                </Btn>
+              </div>
+            </Card>
+          </div>
+        </div>
+      );
+    }
+
+    // =========================================================================
+    // Dashboard stub (Step 1 complete — Step 2 fills this with real cost data)
+    // =========================================================================
+    function Dashboard({ selected, allSubs, onChangeSubs, onSignOut }) {
+      const chosen = allSubs.filter(s => selected.has(s.id));
+      return (
+        <div className="min-h-screen bg-slate-50">
+          <div className="bg-white border-b border-slate-200 px-6 py-3 flex items-center justify-between">
+            <div className="flex items-center gap-2.5">
+              <Icon d={ICONS.cloud} size={20} className="text-blue-600" />
+              <span className="font-semibold text-slate-900 text-sm">Azure Cost Dashboard</span>
+            </div>
+            <div className="flex items-center gap-2">
+              <Btn variant="secondary" onClick={onChangeSubs}>
+                <Icon d={ICONS.refresh} size={13} /> Subscriptions
+              </Btn>
+              <Btn variant="ghost" onClick={onSignOut}>
+                <Icon d={ICONS.logout} size={13} /> Sign out
+              </Btn>
+            </div>
+          </div>
+
+          <div className="max-w-5xl mx-auto px-6 py-8 space-y-5">
+            <div className="flex gap-3 items-start p-4 bg-emerald-50 border border-emerald-200 rounded-xl">
+              <Icon d={ICONS.check} size={18} className="text-emerald-600 flex-shrink-0 mt-0.5" />
+              <div>
+                <p className="font-semibold text-emerald-900">Step 1 complete — auth working ✓</p>
+                <p className="text-sm text-emerald-700 mt-0.5">
+                  Signed in successfully. {chosen.length} subscription{chosen.length !== 1 ? "s" : ""} selected.
+                </p>
+              </div>
+            </div>
+
+            <Card>
+              <div className="px-5 py-3 border-b border-slate-100">
+                <h3 className="text-sm font-semibold text-slate-700">Selected subscriptions</h3>
+              </div>
+              {chosen.map(s => (
+                <div key={s.id} className="px-5 py-3 flex items-center gap-3 border-b border-slate-100 last:border-0">
+                  <Icon d={ICONS.check} size={14} className="text-emerald-500 flex-shrink-0" />
+                  <div>
+                    <div className="text-sm font-medium text-slate-900">{s.name}</div>
+                    <div className="text-xs text-slate-400 font-mono">{s.id}</div>
+                  </div>
+                </div>
+              ))}
+            </Card>
+
+            <div className="p-4 bg-blue-50 border border-blue-200 rounded-xl text-sm text-blue-800">
+              <strong>Step 2 next:</strong> fetching cost data from <code className="bg-blue-100 px-1 rounded">Microsoft.Consumption/usageDetails</code> for each subscription, then rendering KPI cards, time-series and grouping charts.
+            </div>
+          </div>
+        </div>
+      );
+    }
+
+    // =========================================================================
+    // Root App
+    // =========================================================================
+    function App() {
+      const [phase, setPhase]           = useState("init");
+      const [token, setToken]           = useState(null);
+      const [subs, setSubs]             = useState([]);
+      const [selected, setSelected]     = useState(new Set());
+      const [busy, setBusy]             = useState(false);
+      const [error, setError]           = useState(null);
+      const [subsLoading, setSubsLoading] = useState(false);
+
+      // ── Handle redirect back from Microsoft (code in URL) ─────────────────
+      useEffect(() => {
+        const params = new URLSearchParams(window.location.search);
+        const code   = params.get("code");
+        const err    = params.get("error");
+
+        if (err) {
+          // Clean the URL then show error
+          window.history.replaceState({}, "", window.location.pathname);
+          setError(params.get("error_description") || err);
+          setPhase("signin");
+          return;
+        }
+
+        if (code) {
+          // Clean URL immediately so refresh doesn't re-use code
+          window.history.replaceState({}, "", window.location.pathname);
+          const verifier = sessionStorage.getItem("pkce_verifier");
+          sessionStorage.removeItem("pkce_verifier");
+          if (!verifier) {
+            setError("PKCE verifier missing — please try signing in again.");
+            setPhase("signin");
+            return;
+          }
+          setBusy(true);
+          exchangeCode(code, verifier)
+            .then(async resp => {
+              const t = makeToken(resp, null);
+              kv.set("auth:token", t);
+              setToken(t);
+              await loadSubsAndAdvance(t);
+            })
+            .catch(e => { setError(e.message); setPhase("signin"); })
+            .finally(() => setBusy(false));
+          return;
+        }
+
+        // No code in URL — check stored token
+        hydrateFromStorage();
+      }, []);
+
+      async function hydrateFromStorage() {
+        try {
+          const raw = kv.get("auth:token");
+          if (raw) {
+            const t = JSON.parse(raw);
+            if (t.expires_at > Date.now() + 60_000) {
+              setToken(t);
+              await loadSubsAndAdvance(t);
+              return;
+            } else if (t.refresh_token) {
+              try {
+                const fresh = await doRefresh(t.refresh_token);
+                const nt = makeToken(fresh, t.refresh_token);
+                kv.set("auth:token", nt);
+                setToken(nt);
+                await loadSubsAndAdvance(nt);
+                return;
+              } catch { /* fall through to sign-in */ }
+            }
+          }
+        } catch {}
+        setPhase("signin");
+      }
+
+      async function loadSubsAndAdvance(t) {
+        setSubsLoading(true);
+        setPhase("subs");
+        try {
+          const list = await listSubs(t.access_token);
+          setSubs(list);
+          const selRaw = kv.get("subs:selected");
+          if (selRaw) setSelected(new Set(JSON.parse(selRaw)));
+        } catch (e) {
+          setError(e.message);
+        } finally {
+          setSubsLoading(false);
+        }
+      }
+
+      // ── Sign in — redirect flow (no popup needed on a real hosted page) ───
+      const signIn = useCallback(async () => {
+        setError(null);
+        setBusy(true);
+        try {
+          const { verifier, challenge } = await makePkce();
+          const state = b64url(randBytes(16).buffer);
+          sessionStorage.setItem("pkce_verifier", verifier);
+          sessionStorage.setItem("pkce_state",    state);
+          window.location.href = buildAuthUrl(challenge, state);
+          // Page navigates away — no finally needed
+        } catch (e) {
+          setError(e.message);
+          setBusy(false);
+        }
+      }, []);
+
+      const signOut = useCallback(() => {
+        kv.del("auth:token");
+        kv.del("subs:selected");
+        setToken(null); setSubs([]); setSelected(new Set()); setError(null);
+        setPhase("signin");
+      }, []);
+
+      const toggleSub = id => setSelected(p => {
+        const n = new Set(p); n.has(id) ? n.delete(id) : n.add(id); return n;
+      });
+
+      const selectAll = () =>
+        setSelected(selected.size === subs.length ? new Set() : new Set(subs.map(s => s.id)));
+
+      const goToDashboard = () => {
+        kv.set("subs:selected", JSON.stringify([...selected]));
+        setPhase("dashboard");
+      };
+
+      // ── Render ────────────────────────────────────────────────────────────
+      if (phase === "init" || (phase === "signin" && busy)) return (
+        <div className="min-h-screen bg-slate-50 flex flex-col items-center justify-center gap-3">
+          <Spinner size={28} className="text-blue-400" />
+          <p className="text-sm text-slate-400">
+            {busy ? "Completing sign-in…" : "Loading…"}
+          </p>
+        </div>
+      );
+
+      if (phase === "signin") return (
+        <SignInScreen onSignIn={signIn} busy={busy} error={error} />
+      );
+
+      if (phase === "subs") return (
+        <SubPicker
+          subs={subs} selected={selected}
+          onToggle={toggleSub} onSelectAll={selectAll}
+          onContinue={goToDashboard} onSignOut={signOut}
+          loading={subsLoading}
+        />
+      );
+
+      if (phase === "dashboard") return (
+        <Dashboard selected={selected} allSubs={subs}
+          onChangeSubs={() => setPhase("subs")} onSignOut={signOut} />
+      );
+
+      return null;
+    }
+
+    ReactDOM.createRoot(document.getElementById("root")).render(<App />);
+  </script>
+</body>
+</html>
