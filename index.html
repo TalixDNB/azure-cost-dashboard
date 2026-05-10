@@ -7,40 +7,42 @@
   <script src="https://cdnjs.cloudflare.com/ajax/libs/react/18.2.0/umd/react.production.min.js"></script>
   <script src="https://cdnjs.cloudflare.com/ajax/libs/react-dom/18.2.0/umd/react-dom.production.min.js"></script>
   <script src="https://cdnjs.cloudflare.com/ajax/libs/babel-standalone/7.23.5/babel.min.js"></script>
-  <script src="https://cdnjs.cloudflare.com/ajax/libs/recharts/2.12.7/Recharts.min.js"></script>
+  <script src="https://unpkg.com/prop-types@15.8.1/prop-types.min.js"></script>
+  <script src="https://unpkg.com/recharts@2.12.7/umd/Recharts.js"></script>
   <script src="https://cdn.tailwindcss.com"></script>
   <style>
     body { margin: 0; font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', sans-serif; }
     .spin { animation: spin 1s linear infinite; }
     @keyframes spin { from { transform: rotate(0deg); } to { transform: rotate(360deg); } }
+    .recharts-default-tooltip { border-radius: 8px !important; border: 1px solid #e2e8f0 !important; box-shadow: 0 4px 6px -1px rgba(0,0,0,0.1) !important; }
   </style>
 </head>
 <body>
   <div id="root"></div>
 
-  <script type="text/babel">
-    const { useState, useEffect, useCallback, useRef } = React;
+  <script type="text/babel" data-presets="env,react">
+    const { useState, useEffect, useCallback, useMemo } = React;
+    const { LineChart, Line, BarChart, Bar, XAxis, YAxis, CartesianGrid, Tooltip, ResponsiveContainer, Cell } = Recharts;
 
     // =========================================================================
     // CONFIG
     // =========================================================================
-    const CLIENT_ID   = "dcdf39df-efdf-4f55-96fb-c24f4f9111ac";
-    const TENANT      = "460bc2b5-594c-44eb-8930-8d13538d7f0e";
-    const SCOPES      = "https://management.azure.com/user_impersonation offline_access openid profile";
-    const AUTH_EP     = `https://login.microsoftonline.com/${TENANT}/oauth2/v2.0/authorize`;
-    const TOKEN_EP    = `https://login.microsoftonline.com/${TENANT}/oauth2/v2.0/token`;
-    const ARM_BASE    = "https://management.azure.com";
+    const CLIENT_ID    = "dcdf39df-efdf-4f55-96fb-c24f4f9111ac";
+    const TENANT       = "460bc2b5-594c-44eb-8930-8d13538d7f0e";
+    const SCOPES       = "https://management.azure.com/user_impersonation offline_access openid profile";
+    const AUTH_EP      = `https://login.microsoftonline.com/${TENANT}/oauth2/v2.0/authorize`;
+    const TOKEN_EP     = `https://login.microsoftonline.com/${TENANT}/oauth2/v2.0/token`;
+    const ARM_BASE     = "https://management.azure.com";
     const REDIRECT_URI = "https://talixdnb.github.io/azure-cost-dashboard/";
+
+    const CACHE_TTL_MS = 6 * 60 * 60 * 1000; // 6 hours
 
     // =========================================================================
     // PKCE
     // =========================================================================
-    const b64url = buf =>
-      btoa(String.fromCharCode(...new Uint8Array(buf)))
-        .replace(/\+/g,"-").replace(/\//g,"_").replace(/=+$/,"");
-
+    const b64url = buf => btoa(String.fromCharCode(...new Uint8Array(buf)))
+      .replace(/\+/g,"-").replace(/\//g,"_").replace(/=+$/,"");
     const randBytes = n => { const a = new Uint8Array(n); crypto.getRandomValues(a); return a; };
-
     const makePkce = async () => {
       const verifier  = b64url(randBytes(64).buffer);
       const challenge = b64url(await crypto.subtle.digest("SHA-256", new TextEncoder().encode(verifier)));
@@ -48,7 +50,7 @@
     };
 
     // =========================================================================
-    // Storage — localStorage with in-memory fallback
+    // Storage
     // =========================================================================
     const mem = {};
     const kv = {
@@ -106,15 +108,33 @@
       };
     }
 
+    // Token getter that auto-refreshes when needed.
+    async function ensureValidToken(setToken) {
+      const raw = kv.get("auth:token");
+      if (!raw) throw new Error("Not signed in");
+      const t = JSON.parse(raw);
+      if (t.expires_at > Date.now() + 60_000) return t.access_token;
+      if (!t.refresh_token) throw new Error("Token expired, please sign in again");
+      const fresh = await doRefresh(t.refresh_token);
+      const nt = makeToken(fresh, t.refresh_token);
+      kv.set("auth:token", nt);
+      if (setToken) setToken(nt);
+      return nt.access_token;
+    }
+
     // =========================================================================
     // ARM
     // =========================================================================
-    async function armGet(path, at) {
-      const res = await fetch(`${ARM_BASE}${path}`, {
-        headers: { Authorization: `Bearer ${at}` }
-      });
+    async function armGet(url, at) {
+      const fullUrl = url.startsWith("http") ? url : `${ARM_BASE}${url}`;
+      const res = await fetch(fullUrl, { headers: { Authorization: `Bearer ${at}` } });
       if (res.status === 401) throw new Error("TOKEN_EXPIRED");
-      if (!res.ok) { const t = await res.text(); throw new Error(`${res.status}: ${t}`); }
+      if (res.status === 429) {
+        const retry = parseInt(res.headers.get("retry-after") || "30", 10);
+        await new Promise(r => setTimeout(r, retry * 1000));
+        return armGet(url, at);
+      }
+      if (!res.ok) { const t = await res.text(); throw new Error(`${res.status}: ${t.slice(0, 300)}`); }
       return res.json();
     }
 
@@ -123,6 +143,219 @@
       return (j.value || [])
         .map(s => ({ id: s.subscriptionId, name: s.displayName, state: s.state }))
         .sort((a, b) => a.name.localeCompare(b.name));
+    }
+
+    // Fetch all usage details for a subscription within [fromDate, toDate].
+    // PAYG subscriptions use api-version=2019-10-01 with $filter on usageStart/usageEnd.
+    // Paginated via @nextLink — we follow until exhausted.
+    async function fetchUsageDetails(subId, fromDate, toDate, at, onProgress) {
+      const fromIso = fromDate;  // "YYYY-MM-DD"
+      const toIso   = toDate;
+      const filter  = `properties/usageStart ge '${fromIso}' and properties/usageEnd le '${toIso}'`;
+      let url = `/subscriptions/${subId}/providers/Microsoft.Consumption/usageDetails`
+              + `?api-version=2019-10-01`
+              + `&$filter=${encodeURIComponent(filter)}`
+              + `&$top=1000`
+              + `&metric=actualcost`;
+
+      const all = [];
+      let pages = 0;
+      while (url) {
+        const j = await armGet(url, at);
+        if (Array.isArray(j.value)) all.push(...j.value);
+        url = j.nextLink || null;
+        pages++;
+        if (onProgress) onProgress(all.length, pages);
+        // Safety bail-out: PAYG accounts in a 30-day window almost never exceed ~50k records,
+        // but guard against runaway loops.
+        if (pages > 200) break;
+      }
+      return all;
+    }
+
+    // Normalise a usage detail record into our flat shape.
+    // The API returns "Legacy" (PAYG) or "Modern" records — slightly different schemas.
+    function normaliseRecord(r, subscriptionName) {
+      const p = r.properties || {};
+      // Try multiple field names; PAYG (legacy) uses different keys vs MCA (modern)
+      const cost     = p.cost ?? p.costInBillingCurrency ?? p.pretaxCost ?? 0;
+      const currency = p.billingCurrency ?? p.billingCurrencyCode ?? "USD";
+      const date     = (p.date ?? p.usageStart ?? "").slice(0, 10);  // YYYY-MM-DD
+      const service  = p.consumedService ?? p.meterCategory ?? "Unknown";
+      const meterCat = p.meterCategory ?? "Unknown";
+      const meterSub = p.meterSubCategory ?? "";
+      const meterName= p.meterName ?? "";
+      const rg       = (p.resourceGroup ?? p.resourceGroupName ?? "").toLowerCase();
+      const resId    = p.instanceName ?? p.resourceId ?? p.instanceId ?? "";
+      const resName  = resId ? resId.split("/").pop() : (p.instanceName || "—");
+      const location = p.resourceLocation ?? p.location ?? "—";
+
+      return {
+        date, cost: Number(cost) || 0, currency,
+        service, meterCategory: meterCat, meterSubCategory: meterSub, meterName,
+        resourceGroup: rg || "—",
+        resourceId: resId,
+        resourceName: resName,
+        location,
+        subscriptionId: r.id?.split("/")[2] || "",
+        subscriptionName
+      };
+    }
+
+    // =========================================================================
+    // Cost data: fetch + cache for selected subs
+    // =========================================================================
+    function cacheKey(subIds, days) {
+      return `cost:${[...subIds].sort().join(",")}:${days}`;
+    }
+
+    async function getCostData(selectedSubs, allSubs, days, at, opts) {
+      const { force = false, onProgress } = opts || {};
+      const key = cacheKey([...selectedSubs], days);
+      if (!force) {
+        const raw = kv.get(key);
+        if (raw) {
+          try {
+            const cached = JSON.parse(raw);
+            if (Date.now() - cached.fetchedAt < CACHE_TTL_MS) {
+              return { ...cached, fromCache: true };
+            }
+          } catch {}
+        }
+      }
+
+      const today = new Date();
+      const from  = new Date(today);
+      from.setDate(from.getDate() - days);
+      const fromStr = from.toISOString().slice(0, 10);
+      const toStr   = today.toISOString().slice(0, 10);
+
+      const records = [];
+      const subList = allSubs.filter(s => selectedSubs.has(s.id));
+      let i = 0;
+      for (const sub of subList) {
+        i++;
+        if (onProgress) onProgress(`Fetching ${sub.name} (${i}/${subList.length})…`, 0);
+        const raw = await fetchUsageDetails(sub.id, fromStr, toStr, at,
+          (count) => { if (onProgress) onProgress(`Fetching ${sub.name}: ${count} records…`, count); });
+        for (const r of raw) records.push(normaliseRecord(r, sub.name));
+      }
+
+      const currency = records.find(r => r.currency)?.currency || "USD";
+      const data = {
+        currency,
+        fetchedAt: Date.now(),
+        from: fromStr,
+        to:   toStr,
+        days,
+        subIds: [...selectedSubs],
+        records
+      };
+      kv.set(key, JSON.stringify(data));
+      return { ...data, fromCache: false };
+    }
+
+    // =========================================================================
+    // Aggregation helpers
+    // =========================================================================
+    function formatMoney(n, currency) {
+      if (n == null || isNaN(n)) return "—";
+      try {
+        return new Intl.NumberFormat(undefined, { style: "currency", currency, maximumFractionDigits: 2 }).format(n);
+      } catch {
+        return `${currency} ${n.toFixed(2)}`;
+      }
+    }
+
+    function formatMoneyCompact(n, currency) {
+      if (n == null || isNaN(n)) return "—";
+      const abs = Math.abs(n);
+      if (abs >= 1000) {
+        try {
+          return new Intl.NumberFormat(undefined, { style: "currency", currency, maximumFractionDigits: 1, notation: "compact" }).format(n);
+        } catch {}
+      }
+      return formatMoney(n, currency);
+    }
+
+    function groupSum(records, keyFn) {
+      const map = new Map();
+      for (const r of records) {
+        const k = keyFn(r) || "—";
+        map.set(k, (map.get(k) || 0) + r.cost);
+      }
+      return [...map.entries()].map(([name, value]) => ({ name, value }))
+        .sort((a, b) => b.value - a.value);
+    }
+
+    function buildTimeSeries(records, fromDate, toDate) {
+      // Build array of { date: "MM-DD", iso: "YYYY-MM-DD", cost: n }
+      const map = new Map();
+      for (const r of records) map.set(r.date, (map.get(r.date) || 0) + r.cost);
+      // Fill gaps
+      const out = [];
+      const cur = new Date(fromDate);
+      const end = new Date(toDate);
+      while (cur <= end) {
+        const iso = cur.toISOString().slice(0, 10);
+        out.push({
+          iso,
+          date: iso.slice(5),  // MM-DD
+          cost: map.get(iso) || 0
+        });
+        cur.setDate(cur.getDate() + 1);
+      }
+      return out;
+    }
+
+    function calcStats(records, days) {
+      const total = records.reduce((s, r) => s + r.cost, 0);
+      // Highest single day
+      const byDate = new Map();
+      for (const r of records) byDate.set(r.date, (byDate.get(r.date) || 0) + r.cost);
+      let peakDay = { date: "—", cost: 0 };
+      for (const [d, c] of byDate.entries()) if (c > peakDay.cost) peakDay = { date: d, cost: c };
+      // Trend: last half vs first half
+      const cutoff = new Date(); cutoff.setDate(cutoff.getDate() - Math.floor(days / 2));
+      const cutoffIso = cutoff.toISOString().slice(0, 10);
+      let recent = 0, earlier = 0;
+      for (const r of records) (r.date >= cutoffIso ? recent : earlier) += 0; // (placeholder for js destructure quirk)
+      recent = records.filter(r => r.date >= cutoffIso).reduce((s, r) => s + r.cost, 0);
+      earlier = records.filter(r => r.date < cutoffIso).reduce((s, r) => s + r.cost, 0);
+      const trendPct = earlier > 0 ? ((recent - earlier) / earlier) * 100 : null;
+      return {
+        total,
+        avgDaily: total / days,
+        peakDay,
+        trendPct,
+        recentHalf: recent,
+        earlierHalf: earlier
+      };
+    }
+
+    // Top movers: compare sum-by-resource between first half and second half of range.
+    function calcMovers(records, days, groupKey = "resourceName") {
+      const cutoff = new Date(); cutoff.setDate(cutoff.getDate() - Math.floor(days / 2));
+      const cutoffIso = cutoff.toISOString().slice(0, 10);
+      const firstHalf = new Map();
+      const secondHalf = new Map();
+      for (const r of records) {
+        const k = r[groupKey] || "—";
+        if (r.date >= cutoffIso) secondHalf.set(k, (secondHalf.get(k) || 0) + r.cost);
+        else firstHalf.set(k, (firstHalf.get(k) || 0) + r.cost);
+      }
+      const keys = new Set([...firstHalf.keys(), ...secondHalf.keys()]);
+      const movers = [];
+      for (const k of keys) {
+        const before = firstHalf.get(k) || 0;
+        const after  = secondHalf.get(k) || 0;
+        const delta  = after - before;
+        if (Math.abs(delta) < 0.5) continue; // ignore noise below $0.50
+        movers.push({ name: k, before, after, delta, pct: before > 0 ? (delta / before) * 100 : null });
+      }
+      const increasing = movers.filter(m => m.delta > 0).sort((a, b) => b.delta - a.delta).slice(0, 5);
+      const decreasing = movers.filter(m => m.delta < 0).sort((a, b) => a.delta - b.delta).slice(0, 5);
+      return { increasing, decreasing };
     }
 
     // =========================================================================
@@ -138,15 +371,15 @@
       );
     }
 
-    function Icon({ d, size = 18, className = "" }) {
+    function Icon({ d, size = 18, className = "", strokeWidth = 2 }) {
       return (
-        <svg width={size} height={size} viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round" className={className}>
-          <path d={d} />
+        <svg width={size} height={size} viewBox="0 0 24 24" fill="none" stroke="currentColor"
+          strokeWidth={strokeWidth} strokeLinecap="round" strokeLinejoin="round" className={className}>
+          {Array.isArray(d) ? d.map((path, i) => <path key={i} d={path} />) : <path d={d} />}
         </svg>
       );
     }
 
-    // Common icon paths
     const ICONS = {
       cloud:    "M18 10h-1.26A8 8 0 1 0 9 20h9a5 5 0 0 0 0-10z",
       login:    "M15 3h4a2 2 0 0 1 2 2v14a2 2 0 0 1-2 2h-4M10 17l5-5-5-5M15 12H3",
@@ -155,25 +388,29 @@
       alert:    "M10.29 3.86L1.82 18a2 2 0 0 0 1.71 3h16.94a2 2 0 0 0 1.71-3L13.71 3.86a2 2 0 0 0-3.42 0zM12 9v4M12 17h.01",
       chevron:  "M9 18l6-6-6-6",
       refresh:  "M23 4v6h-6M1 20v-6h6M3.51 9a9 9 0 0 1 14.85-3.36L23 10M1 14l4.64 4.36A9 9 0 0 0 20.49 15",
-      copy:     "M8 4H6a2 2 0 0 0-2 2v12a2 2 0 0 0 2 2h8a2 2 0 0 0 2-2v-2M16 4h2a2 2 0 0 1 2 2v4M12 2h4v4h-4z",
-      external: "M18 13v6a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2V8a2 2 0 0 1 2-2h6M15 3h6v6M10 14L21 3",
+      trendUp:  "M23 6l-9.5 9.5-5-5L1 18M17 6h6v6",
+      trendDn:  "M23 18l-9.5-9.5-5 5L1 6M17 18h6v-6",
       filter:   "M22 3H2l8 9.46V19l4 2v-8.54L22 3",
-      bar:      "M12 20V10M18 20V4M6 20v-4",
-      trend:    "M23 6l-9.5 9.5-5-5L1 18",
+      cog:      "M12 15a3 3 0 1 0 0-6 3 3 0 0 0 0 6zM19.4 15a1.65 1.65 0 0 0 .33 1.82l.06.06a2 2 0 0 1 0 2.83 2 2 0 0 1-2.83 0l-.06-.06a1.65 1.65 0 0 0-1.82-.33 1.65 1.65 0 0 0-1 1.51V21a2 2 0 0 1-4 0v-.09A1.65 1.65 0 0 0 9 19.4a1.65 1.65 0 0 0-1.82.33l-.06.06a2 2 0 0 1-2.83 0 2 2 0 0 1 0-2.83l.06-.06a1.65 1.65 0 0 0 .33-1.82 1.65 1.65 0 0 0-1.51-1H3a2 2 0 0 1 0-4h.09A1.65 1.65 0 0 0 4.6 9a1.65 1.65 0 0 0-.33-1.82l-.06-.06a2 2 0 0 1 0-2.83 2 2 0 0 1 2.83 0l.06.06a1.65 1.65 0 0 0 1.82.33H9a1.65 1.65 0 0 0 1-1.51V3a2 2 0 0 1 4 0v.09a1.65 1.65 0 0 0 1 1.51 1.65 1.65 0 0 0 1.82-.33l.06-.06a2 2 0 0 1 2.83 0 2 2 0 0 1 0 2.83l-.06.06a1.65 1.65 0 0 0-.33 1.82V9a1.65 1.65 0 0 0 1.51 1H21a2 2 0 0 1 0 4h-.09a1.65 1.65 0 0 0-1.51 1z",
+      info:     "M12 22c5.52 0 10-4.48 10-10S17.52 2 12 2 2 6.48 2 12s4.48 10 10 10zM12 16v-4M12 8h.01",
     };
 
-    function Btn({ children, onClick, variant = "primary", disabled, full, className = "" }) {
+    function Btn({ children, onClick, variant = "primary", disabled, full, size = "md", className = "" }) {
       const v = {
         primary:   "bg-blue-600 text-white hover:bg-blue-700 shadow-sm",
         secondary: "bg-white border border-slate-200 text-slate-700 hover:bg-slate-50 shadow-sm",
         ghost:     "text-slate-500 hover:text-slate-700 hover:bg-slate-100",
       };
+      const sz = {
+        sm: "px-2.5 py-1.5 text-xs",
+        md: "px-4 py-2.5 text-sm"
+      };
       return (
         <button onClick={onClick} disabled={disabled}
           className={cx(
-            "inline-flex items-center justify-center gap-2 rounded-lg px-4 py-2.5 text-sm font-medium transition-all",
+            "inline-flex items-center justify-center gap-2 rounded-lg font-medium transition-all",
             "disabled:opacity-40 disabled:cursor-not-allowed select-none",
-            v[variant], full && "w-full", className
+            v[variant], sz[size], full && "w-full", className
           )}>
           {children}
         </button>
@@ -189,13 +426,13 @@
       return (
         <div className="flex gap-2 items-start p-3.5 rounded-lg bg-red-50 border border-red-200 text-sm text-red-800">
           <Icon d={ICONS.alert} size={15} className="flex-shrink-0 mt-0.5 text-red-500" />
-          <span>{msg}</span>
+          <span className="break-words">{msg}</span>
         </div>
       );
     }
 
     // =========================================================================
-    // Sign-in screen
+    // Sign-in
     // =========================================================================
     function SignInScreen({ onSignIn, busy, error }) {
       return (
@@ -210,23 +447,16 @@
                 <p className="text-slate-500 text-sm mt-1">Personal read-only cost tracking</p>
               </div>
             </div>
-
             <Card className="p-6 space-y-4">
               <Btn full onClick={onSignIn} disabled={busy}>
-                {busy
-                  ? <Spinner size={16} className="text-white" />
-                  : <Icon d={ICONS.login} size={16} />}
+                {busy ? <Spinner size={16} className="text-white" /> : <Icon d={ICONS.login} size={16} />}
                 Sign in with Microsoft
               </Btn>
               <ErrBox msg={error} />
               <p className="text-xs text-slate-400 text-center leading-relaxed">
-                You'll be redirected to Microsoft to sign in. Read-only access only — we cannot make any changes to your Azure resources.
+                Read-only access only. We cannot make any changes to your Azure resources.
               </p>
             </Card>
-
-            <p className="text-xs text-slate-400 text-center">
-              Redirect URI: <code className="text-slate-500">{REDIRECT_URI}</code>
-            </p>
           </div>
         </div>
       );
@@ -238,7 +468,7 @@
     function SubPicker({ subs, selected, onToggle, onSelectAll, onContinue, onSignOut, loading }) {
       const allOn = subs.length > 0 && selected.size === subs.length;
       return (
-        <div className="min-h-screen bg-gradient-to-br from-slate-50 to-blue-50 flex items-center justify-center p-6">
+        <div className="min-h-screen bg-gradient-to-br from-slate-50 to-blue-50 flex items-center justify-center p-4 sm:p-6">
           <div className="w-full max-w-lg space-y-4">
             <div className="text-center">
               <h2 className="text-xl font-bold text-slate-900">Choose subscriptions</h2>
@@ -255,7 +485,6 @@
                   </button>
                 )}
               </div>
-
               <div className="divide-y divide-slate-100 max-h-80 overflow-y-auto">
                 {loading && (
                   <div className="flex items-center justify-center py-10">
@@ -274,7 +503,7 @@
                         "w-5 h-5 rounded border-2 flex items-center justify-center flex-shrink-0 transition-colors",
                         on ? "bg-blue-600 border-blue-600" : "border-slate-300 bg-white"
                       )}>
-                        {on && <Icon d={ICONS.check} size={11} className="text-white" />}
+                        {on && <Icon d={ICONS.check} size={11} className="text-white" strokeWidth={3} />}
                       </div>
                       <div className="flex-1 min-w-0">
                         <div className="text-sm font-medium text-slate-900 truncate">{s.name}</div>
@@ -290,7 +519,6 @@
                   );
                 })}
               </div>
-
               <div className="px-4 py-3 border-t border-slate-100 flex items-center justify-between">
                 <Btn variant="ghost" onClick={onSignOut}>
                   <Icon d={ICONS.logout} size={14} /> Sign out
@@ -306,56 +534,376 @@
     }
 
     // =========================================================================
-    // Dashboard stub (Step 1 complete — Step 2 fills this with real cost data)
+    // Dashboard pieces
     // =========================================================================
-    function Dashboard({ selected, allSubs, onChangeSubs, onSignOut }) {
-      const chosen = allSubs.filter(s => selected.has(s.id));
+    function KpiCard({ label, value, sub, trend, trendPct, currency }) {
+      const trendColor = trend == null ? "text-slate-400"
+        : trend > 0 ? "text-rose-600" : "text-emerald-600";
+      const TrendIcon = trend == null ? null : (trend > 0 ? ICONS.trendUp : ICONS.trendDn);
+      return (
+        <Card className="p-4">
+          <div className="text-xs text-slate-500 font-medium uppercase tracking-wide">{label}</div>
+          <div className="mt-1 text-2xl font-bold text-slate-900">{value}</div>
+          {sub && <div className="text-xs text-slate-400 mt-0.5">{sub}</div>}
+          {trend != null && (
+            <div className={cx("mt-2 flex items-center gap-1 text-xs font-medium", trendColor)}>
+              <Icon d={TrendIcon} size={13} />
+              {trendPct != null ? `${trendPct > 0 ? "+" : ""}${trendPct.toFixed(1)}%` : "—"}
+              <span className="text-slate-400 font-normal ml-0.5">vs prior period</span>
+            </div>
+          )}
+        </Card>
+      );
+    }
+
+    const PALETTE = ["#3b82f6","#10b981","#f59e0b","#ef4444","#8b5cf6","#06b6d4","#ec4899","#84cc16","#f97316","#6366f1"];
+
+    function TimeSeriesChart({ data, currency }) {
+      return (
+        <Card className="p-4 sm:p-5">
+          <div className="flex items-center justify-between mb-3">
+            <h3 className="text-sm font-semibold text-slate-700">Daily cost</h3>
+          </div>
+          <div className="h-64">
+            <ResponsiveContainer width="100%" height="100%">
+              <LineChart data={data} margin={{ top: 5, right: 5, bottom: 5, left: 0 }}>
+                <CartesianGrid strokeDasharray="3 3" stroke="#f1f5f9" />
+                <XAxis dataKey="date" tick={{ fontSize: 11, fill: "#64748b" }} interval="preserveStartEnd" />
+                <YAxis tick={{ fontSize: 11, fill: "#64748b" }} tickFormatter={v => formatMoneyCompact(v, currency)} width={60} />
+                <Tooltip
+                  formatter={v => [formatMoney(v, currency), "Cost"]}
+                  labelFormatter={l => `Date: ${l}`}
+                  contentStyle={{ fontSize: 12 }}
+                />
+                <Line type="monotone" dataKey="cost" stroke="#3b82f6" strokeWidth={2} dot={false} />
+              </LineChart>
+            </ResponsiveContainer>
+          </div>
+        </Card>
+      );
+    }
+
+    const GROUPING_OPTIONS = [
+      { id: "service",       label: "Service",    keyFn: r => r.service },
+      { id: "resourceGroup", label: "Resource group", keyFn: r => r.resourceGroup },
+      { id: "resourceName",  label: "Resource",   keyFn: r => r.resourceName },
+      { id: "location",      label: "Location",   keyFn: r => r.location },
+    ];
+
+    function GroupingChart({ records, currency, total }) {
+      const [groupBy, setGroupBy] = useState("service");
+      const grouping = GROUPING_OPTIONS.find(g => g.id === groupBy);
+      const data = useMemo(() => groupSum(records, grouping.keyFn).slice(0, 10), [records, groupBy]);
+      return (
+        <Card className="p-4 sm:p-5">
+          <div className="flex flex-wrap items-center justify-between gap-2 mb-3">
+            <h3 className="text-sm font-semibold text-slate-700">Top 10 by cost</h3>
+            <div className="flex gap-1 flex-wrap">
+              {GROUPING_OPTIONS.map(g => (
+                <button key={g.id} onClick={() => setGroupBy(g.id)}
+                  className={cx(
+                    "text-xs px-2.5 py-1 rounded-md font-medium transition-colors",
+                    groupBy === g.id ? "bg-blue-600 text-white" : "bg-slate-100 text-slate-600 hover:bg-slate-200"
+                  )}>
+                  {g.label}
+                </button>
+              ))}
+            </div>
+          </div>
+          <div className="h-72">
+            {data.length === 0 ? (
+              <div className="h-full flex items-center justify-center text-sm text-slate-400">No data</div>
+            ) : (
+              <ResponsiveContainer width="100%" height="100%">
+                <BarChart data={data} layout="vertical" margin={{ top: 5, right: 10, bottom: 5, left: 0 }}>
+                  <CartesianGrid strokeDasharray="3 3" stroke="#f1f5f9" horizontal={false} />
+                  <XAxis type="number" tick={{ fontSize: 11, fill: "#64748b" }} tickFormatter={v => formatMoneyCompact(v, currency)} />
+                  <YAxis type="category" dataKey="name" tick={{ fontSize: 11, fill: "#334155" }} width={120} />
+                  <Tooltip
+                    formatter={v => [formatMoney(v, currency), "Cost"]}
+                    contentStyle={{ fontSize: 12 }}
+                  />
+                  <Bar dataKey="value" radius={[0, 4, 4, 0]}>
+                    {data.map((entry, i) => <Cell key={i} fill={PALETTE[i % PALETTE.length]} />)}
+                  </Bar>
+                </BarChart>
+              </ResponsiveContainer>
+            )}
+          </div>
+        </Card>
+      );
+    }
+
+    function MoversList({ records, days, currency }) {
+      const [groupBy, setGroupBy] = useState("resourceName");
+      const movers = useMemo(() => calcMovers(records, days, groupBy), [records, days, groupBy]);
+      return (
+        <Card className="p-4 sm:p-5">
+          <div className="flex flex-wrap items-center justify-between gap-2 mb-3">
+            <h3 className="text-sm font-semibold text-slate-700">Top movers</h3>
+            <div className="flex gap-1 flex-wrap">
+              {GROUPING_OPTIONS.map(g => (
+                <button key={g.id} onClick={() => setGroupBy(g.id)}
+                  className={cx(
+                    "text-xs px-2.5 py-1 rounded-md font-medium transition-colors",
+                    groupBy === g.id ? "bg-blue-600 text-white" : "bg-slate-100 text-slate-600 hover:bg-slate-200"
+                  )}>
+                  {g.label}
+                </button>
+              ))}
+            </div>
+          </div>
+          <p className="text-xs text-slate-400 mb-3">Comparing second half vs first half of the period.</p>
+          <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
+            <div>
+              <div className="flex items-center gap-1.5 mb-2 text-xs font-medium text-rose-600">
+                <Icon d={ICONS.trendUp} size={13} /> Increased
+              </div>
+              {movers.increasing.length === 0 ? (
+                <p className="text-xs text-slate-400">None above threshold</p>
+              ) : (
+                <ul className="space-y-1.5">
+                  {movers.increasing.map(m => (
+                    <li key={m.name} className="flex items-center justify-between gap-2 text-sm">
+                      <span className="truncate text-slate-700">{m.name}</span>
+                      <span className="flex-shrink-0 text-rose-600 font-medium tabular-nums">
+                        +{formatMoney(m.delta, currency)}
+                      </span>
+                    </li>
+                  ))}
+                </ul>
+              )}
+            </div>
+            <div>
+              <div className="flex items-center gap-1.5 mb-2 text-xs font-medium text-emerald-600">
+                <Icon d={ICONS.trendDn} size={13} /> Decreased
+              </div>
+              {movers.decreasing.length === 0 ? (
+                <p className="text-xs text-slate-400">None above threshold</p>
+              ) : (
+                <ul className="space-y-1.5">
+                  {movers.decreasing.map(m => (
+                    <li key={m.name} className="flex items-center justify-between gap-2 text-sm">
+                      <span className="truncate text-slate-700">{m.name}</span>
+                      <span className="flex-shrink-0 text-emerald-600 font-medium tabular-nums">
+                        {formatMoney(m.delta, currency)}
+                      </span>
+                    </li>
+                  ))}
+                </ul>
+              )}
+            </div>
+          </div>
+        </Card>
+      );
+    }
+
+    function DetailTable({ records, currency, totalCost }) {
+      const [search, setSearch] = useState("");
+      const rows = useMemo(() => {
+        // Group by resource
+        const map = new Map();
+        for (const r of records) {
+          const k = r.resourceName + "|" + r.resourceGroup;
+          if (!map.has(k)) map.set(k, { name: r.resourceName, rg: r.resourceGroup, service: r.service, cost: 0 });
+          map.get(k).cost += r.cost;
+        }
+        let arr = [...map.values()].sort((a, b) => b.cost - a.cost);
+        if (search) {
+          const s = search.toLowerCase();
+          arr = arr.filter(r =>
+            r.name.toLowerCase().includes(s) ||
+            r.rg.toLowerCase().includes(s) ||
+            r.service.toLowerCase().includes(s)
+          );
+        }
+        return arr;
+      }, [records, search]);
+
+      return (
+        <Card>
+          <div className="p-4 sm:p-5 border-b border-slate-100 flex flex-wrap items-center justify-between gap-2">
+            <h3 className="text-sm font-semibold text-slate-700">All resources</h3>
+            <input
+              type="text" placeholder="Search…" value={search}
+              onChange={e => setSearch(e.target.value)}
+              className="text-sm border border-slate-200 rounded-md px-3 py-1.5 w-full sm:w-48 focus:outline-none focus:border-blue-400"
+            />
+          </div>
+          <div className="overflow-x-auto">
+            <table className="w-full text-sm">
+              <thead className="bg-slate-50 text-slate-500 text-xs uppercase tracking-wide">
+                <tr>
+                  <th className="px-4 py-2 text-left font-medium">Resource</th>
+                  <th className="px-4 py-2 text-left font-medium hidden sm:table-cell">Service</th>
+                  <th className="px-4 py-2 text-left font-medium hidden md:table-cell">Resource group</th>
+                  <th className="px-4 py-2 text-right font-medium">Cost</th>
+                  <th className="px-4 py-2 text-right font-medium hidden sm:table-cell">% of total</th>
+                </tr>
+              </thead>
+              <tbody className="divide-y divide-slate-100">
+                {rows.length === 0 && (
+                  <tr><td colSpan={5} className="px-4 py-8 text-center text-slate-400">No matching records</td></tr>
+                )}
+                {rows.slice(0, 100).map((r, i) => (
+                  <tr key={i} className="hover:bg-slate-50">
+                    <td className="px-4 py-2.5 text-slate-900 font-medium truncate max-w-[180px]">{r.name}</td>
+                    <td className="px-4 py-2.5 text-slate-500 hidden sm:table-cell">{r.service}</td>
+                    <td className="px-4 py-2.5 text-slate-500 hidden md:table-cell">{r.rg}</td>
+                    <td className="px-4 py-2.5 text-right text-slate-900 tabular-nums">{formatMoney(r.cost, currency)}</td>
+                    <td className="px-4 py-2.5 text-right text-slate-500 tabular-nums hidden sm:table-cell">
+                      {totalCost > 0 ? ((r.cost / totalCost) * 100).toFixed(1) + "%" : "—"}
+                    </td>
+                  </tr>
+                ))}
+              </tbody>
+            </table>
+            {rows.length > 100 && (
+              <p className="px-4 py-2.5 text-xs text-slate-400 text-center bg-slate-50">
+                Showing top 100 of {rows.length} results
+              </p>
+            )}
+          </div>
+        </Card>
+      );
+    }
+
+    // =========================================================================
+    // Main Dashboard
+    // =========================================================================
+    function Dashboard({ selected, allSubs, onChangeSubs, onSignOut, setToken }) {
+      const [days, setDays]               = useState(30);
+      const [data, setData]               = useState(null);
+      const [loading, setLoading]         = useState(true);
+      const [progressMsg, setProgressMsg] = useState("");
+      const [error, setError]             = useState(null);
+
+      const load = useCallback(async (force = false) => {
+        setError(null);
+        setLoading(true);
+        setProgressMsg("Loading…");
+        try {
+          const at = await ensureValidToken(setToken);
+          const result = await getCostData(selected, allSubs, days, at, {
+            force,
+            onProgress: msg => setProgressMsg(msg)
+          });
+          setData(result);
+        } catch (e) {
+          setError(e.message);
+        } finally {
+          setLoading(false);
+          setProgressMsg("");
+        }
+      }, [selected, allSubs, days, setToken]);
+
+      useEffect(() => { load(false); }, [load]);
+
+      const stats = useMemo(() => data ? calcStats(data.records, days) : null, [data, days]);
+      const ts    = useMemo(() => data ? buildTimeSeries(data.records, data.from, data.to) : [], [data]);
+
+      const cacheAge = data ? Math.floor((Date.now() - data.fetchedAt) / 60000) : 0;
+
       return (
         <div className="min-h-screen bg-slate-50">
-          <div className="bg-white border-b border-slate-200 px-6 py-3 flex items-center justify-between">
-            <div className="flex items-center gap-2.5">
-              <Icon d={ICONS.cloud} size={20} className="text-blue-600" />
-              <span className="font-semibold text-slate-900 text-sm">Azure Cost Dashboard</span>
-            </div>
-            <div className="flex items-center gap-2">
-              <Btn variant="secondary" onClick={onChangeSubs}>
-                <Icon d={ICONS.refresh} size={13} /> Subscriptions
-              </Btn>
-              <Btn variant="ghost" onClick={onSignOut}>
-                <Icon d={ICONS.logout} size={13} /> Sign out
-              </Btn>
+          {/* Top bar */}
+          <div className="bg-white border-b border-slate-200 sticky top-0 z-10">
+            <div className="max-w-6xl mx-auto px-4 sm:px-6 py-3 flex items-center justify-between gap-2">
+              <div className="flex items-center gap-2 min-w-0">
+                <Icon d={ICONS.cloud} size={20} className="text-blue-600 flex-shrink-0" />
+                <span className="font-semibold text-slate-900 text-sm truncate">Azure Cost Dashboard</span>
+              </div>
+              <div className="flex items-center gap-1 sm:gap-2">
+                <Btn variant="secondary" size="sm" onClick={onChangeSubs}>
+                  <Icon d={ICONS.filter} size={13} />
+                  <span className="hidden sm:inline">Subscriptions</span>
+                </Btn>
+                <Btn variant="ghost" size="sm" onClick={onSignOut}>
+                  <Icon d={ICONS.logout} size={13} />
+                  <span className="hidden sm:inline">Sign out</span>
+                </Btn>
+              </div>
             </div>
           </div>
 
-          <div className="max-w-5xl mx-auto px-6 py-8 space-y-5">
-            <div className="flex gap-3 items-start p-4 bg-emerald-50 border border-emerald-200 rounded-xl">
-              <Icon d={ICONS.check} size={18} className="text-emerald-600 flex-shrink-0 mt-0.5" />
-              <div>
-                <p className="font-semibold text-emerald-900">Step 1 complete — auth working ✓</p>
-                <p className="text-sm text-emerald-700 mt-0.5">
-                  Signed in successfully. {chosen.length} subscription{chosen.length !== 1 ? "s" : ""} selected.
-                </p>
+          <div className="max-w-6xl mx-auto px-4 sm:px-6 py-6 space-y-5">
+            {/* Controls row */}
+            <div className="flex flex-wrap items-center justify-between gap-3">
+              <div className="flex gap-1 bg-white border border-slate-200 rounded-lg p-1 shadow-sm">
+                {[7, 30, 90].map(n => (
+                  <button key={n} onClick={() => setDays(n)}
+                    className={cx(
+                      "px-3 py-1.5 text-xs font-medium rounded-md transition-colors",
+                      days === n ? "bg-slate-900 text-white" : "text-slate-600 hover:bg-slate-100"
+                    )}>
+                    {n}d
+                  </button>
+                ))}
+              </div>
+              <div className="flex items-center gap-2">
+                {data && (
+                  <span className="text-xs text-slate-400 hidden sm:block">
+                    {data.fromCache ? `Cached ${cacheAge}m ago` : "Just now"} · {data.records.length.toLocaleString()} records
+                  </span>
+                )}
+                <Btn variant="secondary" size="sm" onClick={() => load(true)} disabled={loading}>
+                  <Icon d={ICONS.refresh} size={13} className={loading ? "spin" : ""} />
+                  Refresh
+                </Btn>
               </div>
             </div>
 
-            <Card>
-              <div className="px-5 py-3 border-b border-slate-100">
-                <h3 className="text-sm font-semibold text-slate-700">Selected subscriptions</h3>
-              </div>
-              {chosen.map(s => (
-                <div key={s.id} className="px-5 py-3 flex items-center gap-3 border-b border-slate-100 last:border-0">
-                  <Icon d={ICONS.check} size={14} className="text-emerald-500 flex-shrink-0" />
-                  <div>
-                    <div className="text-sm font-medium text-slate-900">{s.name}</div>
-                    <div className="text-xs text-slate-400 font-mono">{s.id}</div>
-                  </div>
+            <ErrBox msg={error} />
+
+            {/* Loading state */}
+            {loading && !data && (
+              <Card className="p-10 flex flex-col items-center gap-3">
+                <Spinner size={28} className="text-blue-400" />
+                <div className="text-sm text-slate-500 text-center">{progressMsg || "Fetching cost data…"}</div>
+                <div className="text-xs text-slate-400 text-center max-w-md">
+                  First load can take 10–30 seconds for PAYG subscriptions while we paginate through the usage details API.
                 </div>
-              ))}
-            </Card>
+              </Card>
+            )}
 
-            <div className="p-4 bg-blue-50 border border-blue-200 rounded-xl text-sm text-blue-800">
-              <strong>Step 2 next:</strong> fetching cost data from <code className="bg-blue-100 px-1 rounded">Microsoft.Consumption/usageDetails</code> for each subscription, then rendering KPI cards, time-series and grouping charts.
-            </div>
+            {/* Empty state */}
+            {!loading && data && data.records.length === 0 && (
+              <Card className="p-8 text-center">
+                <Icon d={ICONS.info} size={32} className="text-slate-300 mx-auto mb-2" />
+                <h3 className="font-semibold text-slate-700">No cost data found</h3>
+                <p className="text-sm text-slate-500 mt-1">
+                  No usage records were found in the last {days} days for the selected subscription{selected.size > 1 ? "s" : ""}.
+                  Try a wider time range, or check that your subscription has activity.
+                </p>
+              </Card>
+            )}
+
+            {/* Data */}
+            {data && data.records.length > 0 && stats && (
+              <>
+                {/* KPI grid */}
+                <div className="grid grid-cols-2 lg:grid-cols-4 gap-3">
+                  <KpiCard label={`Total (${days}d)`}
+                           value={formatMoney(stats.total, data.currency)}
+                           sub={`${data.from} → ${data.to}`} />
+                  <KpiCard label="Daily average"
+                           value={formatMoney(stats.avgDaily, data.currency)} />
+                  <KpiCard label="Highest day"
+                           value={formatMoney(stats.peakDay.cost, data.currency)}
+                           sub={stats.peakDay.date} />
+                  <KpiCard label="Trend"
+                           value={stats.trendPct != null ? `${stats.trendPct > 0 ? "+" : ""}${stats.trendPct.toFixed(1)}%` : "—"}
+                           sub={`${formatMoney(stats.recentHalf, data.currency)} vs ${formatMoney(stats.earlierHalf, data.currency)}`}
+                           trend={stats.trendPct}
+                           trendPct={stats.trendPct} />
+                </div>
+
+                <TimeSeriesChart data={ts} currency={data.currency} />
+                <GroupingChart records={data.records} currency={data.currency} total={stats.total} />
+                <MoversList records={data.records} days={days} currency={data.currency} />
+                <DetailTable records={data.records} currency={data.currency} totalCost={stats.total} />
+              </>
+            )}
           </div>
         </div>
       );
@@ -373,14 +921,13 @@
       const [error, setError]           = useState(null);
       const [subsLoading, setSubsLoading] = useState(false);
 
-      // ── Handle redirect back from Microsoft (code in URL) ─────────────────
+      // Handle redirect back from Microsoft
       useEffect(() => {
         const params = new URLSearchParams(window.location.search);
         const code   = params.get("code");
         const err    = params.get("error");
 
         if (err) {
-          // Clean the URL then show error
           window.history.replaceState({}, "", window.location.pathname);
           setError(params.get("error_description") || err);
           setPhase("signin");
@@ -388,7 +935,6 @@
         }
 
         if (code) {
-          // Clean URL immediately so refresh doesn't re-use code
           window.history.replaceState({}, "", window.location.pathname);
           const verifier = sessionStorage.getItem("pkce_verifier");
           sessionStorage.removeItem("pkce_verifier");
@@ -409,8 +955,6 @@
             .finally(() => setBusy(false));
           return;
         }
-
-        // No code in URL — check stored token
         hydrateFromStorage();
       }, []);
 
@@ -431,7 +975,7 @@
                 setToken(nt);
                 await loadSubsAndAdvance(nt);
                 return;
-              } catch { /* fall through to sign-in */ }
+              } catch {}
             }
           }
         } catch {}
@@ -440,20 +984,31 @@
 
       async function loadSubsAndAdvance(t) {
         setSubsLoading(true);
-        setPhase("subs");
+        const selRaw = kv.get("subs:selected");
+        if (selRaw) {
+          try { setSelected(new Set(JSON.parse(selRaw))); } catch {}
+        }
+        // If we already have a saved selection, jump straight to dashboard
+        const savedSel = selRaw ? new Set(JSON.parse(selRaw)) : new Set();
         try {
           const list = await listSubs(t.access_token);
           setSubs(list);
-          const selRaw = kv.get("subs:selected");
-          if (selRaw) setSelected(new Set(JSON.parse(selRaw)));
+          // Validate saved selection still exists
+          const valid = new Set([...savedSel].filter(id => list.some(s => s.id === id)));
+          if (valid.size > 0) {
+            setSelected(valid);
+            setPhase("dashboard");
+          } else {
+            setPhase("subs");
+          }
         } catch (e) {
           setError(e.message);
+          setPhase("subs");
         } finally {
           setSubsLoading(false);
         }
       }
 
-      // ── Sign in — redirect flow (no popup needed on a real hosted page) ───
       const signIn = useCallback(async () => {
         setError(null);
         setBusy(true);
@@ -463,7 +1018,6 @@
           sessionStorage.setItem("pkce_verifier", verifier);
           sessionStorage.setItem("pkce_state",    state);
           window.location.href = buildAuthUrl(challenge, state);
-          // Page navigates away — no finally needed
         } catch (e) {
           setError(e.message);
           setBusy(false);
@@ -473,6 +1027,13 @@
       const signOut = useCallback(() => {
         kv.del("auth:token");
         kv.del("subs:selected");
+        // Clear cost caches too
+        try {
+          for (let i = localStorage.length - 1; i >= 0; i--) {
+            const k = localStorage.key(i);
+            if (k && k.startsWith("cost:")) localStorage.removeItem(k);
+          }
+        } catch {}
         setToken(null); setSubs([]); setSelected(new Set()); setError(null);
         setPhase("signin");
       }, []);
@@ -489,19 +1050,15 @@
         setPhase("dashboard");
       };
 
-      // ── Render ────────────────────────────────────────────────────────────
+      // Render
       if (phase === "init" || (phase === "signin" && busy)) return (
         <div className="min-h-screen bg-slate-50 flex flex-col items-center justify-center gap-3">
           <Spinner size={28} className="text-blue-400" />
-          <p className="text-sm text-slate-400">
-            {busy ? "Completing sign-in…" : "Loading…"}
-          </p>
+          <p className="text-sm text-slate-400">{busy ? "Completing sign-in…" : "Loading…"}</p>
         </div>
       );
 
-      if (phase === "signin") return (
-        <SignInScreen onSignIn={signIn} busy={busy} error={error} />
-      );
+      if (phase === "signin") return <SignInScreen onSignIn={signIn} busy={busy} error={error} />;
 
       if (phase === "subs") return (
         <SubPicker
@@ -513,8 +1070,12 @@
       );
 
       if (phase === "dashboard") return (
-        <Dashboard selected={selected} allSubs={subs}
-          onChangeSubs={() => setPhase("subs")} onSignOut={signOut} />
+        <Dashboard
+          selected={selected} allSubs={subs}
+          onChangeSubs={() => setPhase("subs")}
+          onSignOut={signOut}
+          setToken={setToken}
+        />
       );
 
       return null;
