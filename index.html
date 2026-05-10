@@ -5,10 +5,6 @@
   <meta name="viewport" content="width=device-width, initial-scale=1.0" />
   <title>Azure Cost Dashboard</title>
 
-  <!-- Eruda: mobile browser console - tap the circle button (bottom-right) to open -->
-  <script src="https://cdnjs.cloudflare.com/ajax/libs/eruda/3.0.1/eruda.min.js"></script>
-  <script>eruda.init();</script>
-
   <!-- Visible error overlay in case React never loads -->
   <script>
     window.onerror = function(msg, src, line, col, err) {
@@ -78,9 +74,10 @@
     // Pull Recharts components safely
     const {
       LineChart, Line,
+      AreaChart, Area,
       BarChart, Bar,
       XAxis, YAxis,
-      CartesianGrid, Tooltip,
+      CartesianGrid, Tooltip, Legend,
       ResponsiveContainer, Cell
     } = Recharts;
 
@@ -226,12 +223,24 @@
       return all;
     }
 
+    // Normalize service names — the API mixes casing (e.g. "microsoft.web" and "Microsoft.Storage")
+    function normaliseService(s) {
+      if (!s) return "Unknown";
+      // Capitalize each segment split by dot; e.g. "microsoft.web" → "Microsoft.Web"
+      return s.split(".").map(seg => {
+        if (!seg) return seg;
+        // Preserve all-caps segments (rare but possible)
+        if (seg === seg.toUpperCase() && seg.length > 1) return seg;
+        return seg.charAt(0).toUpperCase() + seg.slice(1).toLowerCase();
+      }).join(".");
+    }
+
     function normaliseRecord(r, subName) {
       const p = r.properties || {};
       const cost     = parseFloat(p.cost ?? p.costInBillingCurrency ?? p.pretaxCost ?? 0) || 0;
       const currency = p.billingCurrency ?? p.billingCurrencyCode ?? "USD";
       const date     = (p.date ?? p.usageStart ?? "").slice(0, 10);
-      const service  = p.consumedService ?? p.meterCategory ?? "Unknown";
+      const service  = normaliseService(p.consumedService ?? p.meterCategory ?? "Unknown");
       const rg       = (p.resourceGroup ?? p.resourceGroupName ?? "—").toLowerCase() || "—";
       const resId    = p.instanceName ?? p.resourceId ?? p.instanceId ?? "";
       const resName  = resId ? resId.split("/").pop() || resId : (p.productOrderName || "—");
@@ -249,7 +258,8 @@
     // Cost data fetch + cache
     // =========================================================================
     function cacheKey(subIds, days) {
-      return `cost:${[...subIds].sort().join(",")}:${days}`;
+      // v2: bumped after service-name normalization was added
+      return `cost:v2:${[...subIds].sort().join(",")}:${days}`;
     }
 
     async function getCostData(selected, allSubs, days, onProgress, force) {
@@ -323,17 +333,111 @@
         .sort((a, b) => b.value - a.value);
     }
 
-    function buildTimeSeries(records, from, to) {
-      const map = {};
-      for (const r of records) map[r.date] = (map[r.date] || 0) + r.cost;
-      const out = [];
+    // Bucket a date string ("YYYY-MM-DD") into a label and sortable key
+    // for the chosen bucket size. Returns { key, label }.
+    function bucketDate(iso, bucket) {
+      const d = new Date(iso);
+      if (bucket === "month") {
+        const y = d.getUTCFullYear();
+        const m = d.getUTCMonth(); // 0-11
+        const key = `${y}-${String(m + 1).padStart(2, "0")}`;
+        const label = d.toLocaleString(undefined, { month: "short", year: "2-digit", timeZone: "UTC" });
+        return { key, label };
+      }
+      if (bucket === "week") {
+        // ISO week starts Monday; we use a simple week-of-year by snapping to Monday.
+        const dt = new Date(Date.UTC(d.getUTCFullYear(), d.getUTCMonth(), d.getUTCDate()));
+        const day = dt.getUTCDay() || 7; // 1..7 (Mon..Sun)
+        dt.setUTCDate(dt.getUTCDate() - (day - 1));
+        const key = dt.toISOString().slice(0, 10);
+        const label = `${dt.toLocaleString(undefined, { month: "short", day: "numeric", timeZone: "UTC" })}`;
+        return { key, label };
+      }
+      // daily
+      return { key: iso, label: iso.slice(5) };
+    }
+
+    // Determine the widest sensible default bucket given a date range in days.
+    function defaultBucket(days) {
+      if (days >= 90) return "month";
+      if (days >= 30) return "week";
+      return "day";
+    }
+
+    // Iterate every day from `from` to `to` inclusive.
+    function* iterDays(from, to) {
       const cur = new Date(from), end = new Date(to);
       while (cur <= end) {
-        const iso = cur.toISOString().slice(0, 10);
-        out.push({ iso, date: iso.slice(5), cost: map[iso] || 0 });
-        cur.setDate(cur.getDate() + 1);
+        yield cur.toISOString().slice(0, 10);
+        cur.setUTCDate(cur.getUTCDate() + 1);
       }
+    }
+
+    // Build a flat (single-series) time series for the chosen bucket, no grouping.
+    function buildTimeSeries(records, from, to, bucket) {
+      // Sum costs by bucket key
+      const sums = {};
+      const labelByKey = {};
+      for (const r of records) {
+        if (!r.date) continue;
+        const { key, label } = bucketDate(r.date, bucket);
+        sums[key] = (sums[key] || 0) + r.cost;
+        labelByKey[key] = label;
+      }
+      // Fill all buckets in range so the chart has continuous x-axis
+      const keysSeen = new Set();
+      const out = [];
+      for (const iso of iterDays(from, to)) {
+        const { key, label } = bucketDate(iso, bucket);
+        if (keysSeen.has(key)) continue;
+        keysSeen.add(key);
+        out.push({ key, label, total: sums[key] || 0 });
+      }
+      out.sort((a, b) => a.key.localeCompare(b.key));
       return out;
+    }
+
+    // Build a multi-series (grouped) time series: one column per top-N groups + "Other".
+    // Returns { rows: [{ key, label, [groupName]: cost, ... }], groupNames: [...] }.
+    function buildGroupedTimeSeries(records, from, to, bucket, keyFn, topN = 6) {
+      // First, compute total cost per group across the whole range to find top N.
+      const groupTotals = {};
+      for (const r of records) {
+        const g = keyFn(r) || "—";
+        groupTotals[g] = (groupTotals[g] || 0) + r.cost;
+      }
+      const sortedGroups = Object.entries(groupTotals)
+        .sort((a, b) => b[1] - a[1])
+        .map(([g]) => g);
+      const topGroups = sortedGroups.slice(0, topN);
+      const otherGroups = new Set(sortedGroups.slice(topN));
+      const includeOther = otherGroups.size > 0;
+      const groupNames = includeOther ? [...topGroups, "Other"] : [...topGroups];
+
+      // Build sums[bucketKey][groupName] = cost
+      const sums = {};
+      for (const r of records) {
+        if (!r.date) continue;
+        const { key } = bucketDate(r.date, bucket);
+        const g = keyFn(r) || "—";
+        const groupName = otherGroups.has(g) ? "Other" : g;
+        if (!sums[key]) sums[key] = {};
+        sums[key][groupName] = (sums[key][groupName] || 0) + r.cost;
+      }
+
+      // Walk every bucket in the date range to fill gaps
+      const seen = new Set();
+      const rows = [];
+      for (const iso of iterDays(from, to)) {
+        const { key, label } = bucketDate(iso, bucket);
+        if (seen.has(key)) continue;
+        seen.add(key);
+        const row = { key, label };
+        for (const g of groupNames) row[g] = (sums[key] && sums[key][g]) || 0;
+        rows.push(row);
+      }
+      rows.sort((a, b) => a.key.localeCompare(b.key));
+      return { rows, groupNames };
     }
 
     function calcStats(records, days) {
@@ -551,42 +655,152 @@
       { id: "location",      label: "Location",   fn: r => r.location },
     ];
 
-    function TimeSeriesChart({ data, currency }) {
+    function TimeSeriesChart({ records, currency, from, to, days, groupOpt, bucket, setBucket, style, setStyle, showTotal, setShowTotal }) {
+      // Decide what data to render
+      const useGrouping = groupOpt && groupOpt.id !== "total";
+      const series = useMemo(() => {
+        if (!useGrouping) {
+          const flat = buildTimeSeries(records, from, to, bucket);
+          return { rows: flat.map(r => ({ ...r })), groupNames: ["total"] };
+        }
+        return buildGroupedTimeSeries(records, from, to, bucket, groupOpt.fn, 6);
+      }, [records, from, to, bucket, useGrouping, groupOpt && groupOpt.id]);
+
+      const BUCKET_OPTS = [
+        { id: "day",   label: "Daily" },
+        { id: "week",  label: "Weekly" },
+        { id: "month", label: "Monthly" },
+      ];
+
+      const isStacked = style === "stacked";
+      const isGrouped = useGrouping;
+
+      // Empty state
+      if (!series.rows.length) {
+        return (
+          <Card className="p-4">
+            <div className="text-sm font-semibold text-slate-700 mb-3">Cost over time</div>
+            <div className="text-sm text-slate-400 text-center py-8">No data in selected range.</div>
+          </Card>
+        );
+      }
+
+      // Tooltip: order entries by value desc and add a Total row when grouped
+      const customTooltip = ({ active, payload, label }) => {
+        if (!active || !payload || !payload.length) return null;
+        const sorted = [...payload].filter(p => p.value > 0).sort((a, b) => b.value - a.value);
+        const total = sorted.reduce((s, p) => s + p.value, 0);
+        return (
+          <div className="bg-white border border-slate-200 rounded-lg shadow-md p-2.5 text-xs max-w-[260px]">
+            <div className="font-semibold text-slate-700 mb-1">{label}</div>
+            {isGrouped && (
+              <div className="flex justify-between gap-3 pb-1 mb-1 border-b border-slate-100">
+                <span className="text-slate-500">Total</span>
+                <span className="font-semibold text-slate-900 tabular-nums">{fmt(total, currency)}</span>
+              </div>
+            )}
+            {sorted.map((p, i) => (
+              <div key={i} className="flex justify-between gap-3 py-0.5">
+                <span className="flex items-center gap-1.5 truncate">
+                  <span className="w-2 h-2 rounded-full flex-shrink-0" style={{ background: p.color }} />
+                  <span className="truncate text-slate-600">{p.dataKey === "total" ? "Cost" : p.dataKey}</span>
+                </span>
+                <span className="tabular-nums text-slate-900 font-medium flex-shrink-0">{fmt(p.value, currency)}</span>
+              </div>
+            ))}
+          </div>
+        );
+      };
+
       return (
         <Card className="p-4">
-          <div className="text-sm font-semibold text-slate-700 mb-3">Daily cost</div>
-          <div style={{ height: 220 }}>
+          <div className="flex flex-wrap items-center justify-between gap-2 mb-2">
+            <div className="text-sm font-semibold text-slate-700">
+              {isGrouped ? `Cost by ${groupOpt.label.toLowerCase()}` : "Daily cost"}
+              <span className="text-xs text-slate-400 font-normal ml-2">({BUCKET_OPTS.find(b => b.id === bucket).label.toLowerCase()})</span>
+            </div>
+          </div>
+
+          {/* Controls row: bucket + style toggle */}
+          <div className="flex flex-wrap items-center gap-2 mb-3">
+            <div className="flex gap-1 bg-slate-100 rounded-md p-0.5">
+              {BUCKET_OPTS.map(b => (
+                <button key={b.id} onClick={() => setBucket(b.id)}
+                  className={cx("text-xs px-2.5 py-1 rounded font-medium transition-colors",
+                    bucket === b.id ? "bg-white text-slate-900 shadow-sm" : "text-slate-500 hover:text-slate-700")}>
+                  {b.label}
+                </button>
+              ))}
+            </div>
+            {isGrouped && (
+              <div className="flex gap-1 bg-slate-100 rounded-md p-0.5">
+                <button onClick={() => setStyle("stacked")}
+                  className={cx("text-xs px-2.5 py-1 rounded font-medium transition-colors",
+                    style === "stacked" ? "bg-white text-slate-900 shadow-sm" : "text-slate-500 hover:text-slate-700")}>
+                  Stacked
+                </button>
+                <button onClick={() => setStyle("lines")}
+                  className={cx("text-xs px-2.5 py-1 rounded font-medium transition-colors",
+                    style === "lines" ? "bg-white text-slate-900 shadow-sm" : "text-slate-500 hover:text-slate-700")}>
+                  Lines
+                </button>
+              </div>
+            )}
+          </div>
+
+          <div style={{ height: 260 }}>
             <ResponsiveContainer width="100%" height="100%">
-              <LineChart data={data} margin={{ top: 5, right: 5, bottom: 0, left: -10 }}>
-                <CartesianGrid strokeDasharray="3 3" stroke="#f1f5f9" />
-                <XAxis dataKey="date" tick={{ fontSize: 10, fill: "#94a3b8" }} interval="preserveStartEnd" />
-                <YAxis tick={{ fontSize: 10, fill: "#94a3b8" }} tickFormatter={v => fmtCompact(v, currency)} width={55} />
-                <Tooltip formatter={v => [fmt(v, currency), "Cost"]} contentStyle={{ fontSize: 12, borderRadius: 8 }} />
-                <Line type="monotone" dataKey="cost" stroke="#3b82f6" strokeWidth={2} dot={false} activeDot={{ r: 4 }} />
-              </LineChart>
+              {(isGrouped && isStacked) ? (
+                <AreaChart data={series.rows} margin={{ top: 5, right: 5, bottom: 0, left: -10 }}>
+                  <CartesianGrid strokeDasharray="3 3" stroke="#f1f5f9" />
+                  <XAxis dataKey="label" tick={{ fontSize: 10, fill: "#94a3b8" }} interval="preserveStartEnd" />
+                  <YAxis tick={{ fontSize: 10, fill: "#94a3b8" }} tickFormatter={v => fmtCompact(v, currency)} width={55} />
+                  <Tooltip content={customTooltip} />
+                  {series.groupNames.map((g, i) => (
+                    <Area key={g} type="monotone" dataKey={g} stackId="1"
+                      stroke={PALETTE[i % PALETTE.length]} fill={PALETTE[i % PALETTE.length]} fillOpacity={0.5} strokeWidth={1.5} />
+                  ))}
+                </AreaChart>
+              ) : (
+                <LineChart data={series.rows} margin={{ top: 5, right: 5, bottom: 0, left: -10 }}>
+                  <CartesianGrid strokeDasharray="3 3" stroke="#f1f5f9" />
+                  <XAxis dataKey="label" tick={{ fontSize: 10, fill: "#94a3b8" }} interval="preserveStartEnd" />
+                  <YAxis tick={{ fontSize: 10, fill: "#94a3b8" }} tickFormatter={v => fmtCompact(v, currency)} width={55} />
+                  <Tooltip content={customTooltip} />
+                  {series.groupNames.map((g, i) => (
+                    <Line key={g} type="monotone" dataKey={g}
+                      stroke={isGrouped ? PALETTE[i % PALETTE.length] : "#3b82f6"}
+                      strokeWidth={2} dot={false} activeDot={{ r: 4 }} />
+                  ))}
+                </LineChart>
+              )}
             </ResponsiveContainer>
           </div>
+
+          {/* Custom legend below the chart, only when grouped */}
+          {isGrouped && (
+            <div className="flex flex-wrap gap-x-3 gap-y-1.5 mt-3 pt-3 border-t border-slate-100">
+              {series.groupNames.map((g, i) => (
+                <div key={g} className="flex items-center gap-1.5 text-xs text-slate-600 max-w-full">
+                  <span className="w-2.5 h-2.5 rounded-sm flex-shrink-0" style={{ background: PALETTE[i % PALETTE.length] }} />
+                  <span className="truncate" title={g}>{g}</span>
+                </div>
+              ))}
+            </div>
+          )}
         </Card>
       );
     }
 
-    function GroupChart({ records, currency }) {
-      const [g, setG] = useState("service");
-      const opt = GROUP_OPTS.find(o => o.id === g);
-      const data = useMemo(() => groupSum(records, opt.fn).slice(0, 8), [records, g]);
+    function GroupChart({ records, currency, groupOpt }) {
+      const data = useMemo(() => groupSum(records, groupOpt.fn).slice(0, 8), [records, groupOpt.id]);
       return (
         <Card className="p-4">
-          <div className="flex flex-wrap items-center justify-between gap-2 mb-3">
-            <div className="text-sm font-semibold text-slate-700">Top by cost</div>
-            <div className="flex gap-1 flex-wrap">
-              {GROUP_OPTS.map(o => (
-                <button key={o.id} onClick={() => setG(o.id)}
-                  className={cx("text-xs px-2 py-1 rounded-md font-medium transition-colors",
-                    g === o.id ? "bg-blue-600 text-white" : "bg-slate-100 text-slate-600 hover:bg-slate-200")}>
-                  {o.label}
-                </button>
-              ))}
+          <div className="flex items-center justify-between mb-3">
+            <div className="text-sm font-semibold text-slate-700">
+              Top by {groupOpt.label.toLowerCase()}
             </div>
+            <span className="text-xs text-slate-400">Top 8</span>
           </div>
           <div style={{ height: 260 }}>
             {data.length === 0
@@ -610,34 +824,27 @@
       );
     }
 
-    function MoversCard({ records, days, currency }) {
-      const [g, setG] = useState("resourceName");
-      const opt = GROUP_OPTS.find(o => o.id === g);
-      const { increasing, decreasing } = useMemo(() => calcMovers(records, days, opt.fn), [records, days, g]);
+    function MoversCard({ records, days, currency, groupOpt }) {
+      const { increasing, decreasing } = useMemo(
+        () => calcMovers(records, days, groupOpt.fn),
+        [records, days, groupOpt.id]
+      );
       return (
         <Card className="p-4">
-          <div className="flex flex-wrap items-center justify-between gap-2 mb-1">
+          <div className="flex items-center justify-between mb-1">
             <div className="text-sm font-semibold text-slate-700">Top movers</div>
-            <div className="flex gap-1 flex-wrap">
-              {GROUP_OPTS.map(o => (
-                <button key={o.id} onClick={() => setG(o.id)}
-                  className={cx("text-xs px-2 py-1 rounded-md font-medium transition-colors",
-                    g === o.id ? "bg-blue-600 text-white" : "bg-slate-100 text-slate-600 hover:bg-slate-200")}>
-                  {o.label}
-                </button>
-              ))}
-            </div>
+            <span className="text-xs text-slate-400">by {groupOpt.label.toLowerCase()}</span>
           </div>
           <p className="text-xs text-slate-400 mb-3">Second half vs first half of the period</p>
           <div className="grid grid-cols-1 sm:grid-cols-2 gap-4">
             <div>
               <div className="text-xs font-semibold text-rose-600 mb-2">▲ Increased</div>
               {increasing.length === 0
-                ? <p className="text-xs text-slate-400">None above $0.50</p>
+                ? <p className="text-xs text-slate-400">None above threshold</p>
                 : increasing.map(m => (
-                  <div key={m.name} className="flex items-center justify-between py-1 text-sm">
-                    <span className="truncate text-slate-700 mr-2">{m.name}</span>
-                    <span className="flex-shrink-0 text-rose-600 font-semibold">+{fmt(m.delta, currency)}</span>
+                  <div key={m.name} className="flex items-center justify-between py-1 text-sm gap-2">
+                    <span className="truncate text-slate-700" title={m.name}>{m.name}</span>
+                    <span className="flex-shrink-0 text-rose-600 font-semibold tabular-nums">+{fmt(m.delta, currency)}</span>
                   </div>
                 ))
               }
@@ -645,11 +852,11 @@
             <div>
               <div className="text-xs font-semibold text-emerald-600 mb-2">▼ Decreased</div>
               {decreasing.length === 0
-                ? <p className="text-xs text-slate-400">None above $0.50</p>
+                ? <p className="text-xs text-slate-400">None above threshold</p>
                 : decreasing.map(m => (
-                  <div key={m.name} className="flex items-center justify-between py-1 text-sm">
-                    <span className="truncate text-slate-700 mr-2">{m.name}</span>
-                    <span className="flex-shrink-0 text-emerald-600 font-semibold">{fmt(m.delta, currency)}</span>
+                  <div key={m.name} className="flex items-center justify-between py-1 text-sm gap-2">
+                    <span className="truncate text-slate-700" title={m.name}>{m.name}</span>
+                    <span className="flex-shrink-0 text-emerald-600 font-semibold tabular-nums">{fmt(m.delta, currency)}</span>
                   </div>
                 ))
               }
@@ -733,6 +940,16 @@
       const [progress, setProgress] = useState("");
       const [error, setError] = useState(null);
 
+      // Shared grouping state — controls both time series and bar chart
+      const [groupId, setGroupId] = useState("service");
+
+      // Time series specific state
+      const [bucket, setBucket]   = useState(() => defaultBucket(30));
+      const [style, setStyle]     = useState("stacked");
+
+      // When days changes, update default bucket
+      useEffect(() => { setBucket(defaultBucket(days)); }, [days]);
+
       const load = useCallback(async (force = false) => {
         setError(null);
         setLoading(true);
@@ -751,8 +968,10 @@
       useEffect(() => { load(false); }, [load]);
 
       const stats = useMemo(() => data ? calcStats(data.records, days) : null, [data, days]);
-      const ts    = useMemo(() => data ? buildTimeSeries(data.records, data.from, data.to) : [], [data]);
       const cacheAge = data ? Math.round((Date.now() - data.fetchedAt) / 60000) : 0;
+
+      // Current grouping option object
+      const groupOpt = GROUP_OPTS.find(o => o.id === groupId) || GROUP_OPTS[0];
 
       return (
         <div className="min-h-screen bg-slate-50">
@@ -773,8 +992,9 @@
           </div>
 
           <div className="max-w-5xl mx-auto px-4 py-5 space-y-4">
-            {/* Controls */}
+            {/* Controls row */}
             <div className="flex flex-wrap items-center justify-between gap-2">
+              {/* Date range */}
               <div className="flex gap-1 bg-white border border-slate-200 rounded-lg p-1 shadow-sm">
                 {[7, 30, 90].map(n => (
                   <button key={n} onClick={() => setDays(n)}
@@ -784,6 +1004,18 @@
                   </button>
                 ))}
               </div>
+
+              {/* Grouping — shared between time series and bar chart */}
+              <div className="flex gap-1 bg-white border border-slate-200 rounded-lg p-1 shadow-sm">
+                {GROUP_OPTS.map(o => (
+                  <button key={o.id} onClick={() => setGroupId(o.id)}
+                    className={cx("px-2.5 py-1.5 text-xs font-semibold rounded-md transition-colors",
+                      groupId === o.id ? "bg-blue-600 text-white" : "text-slate-500 hover:bg-slate-100")}>
+                    {o.label}
+                  </button>
+                ))}
+              </div>
+
               <div className="flex items-center gap-2">
                 {data && (
                   <span className="text-xs text-slate-400">
@@ -798,7 +1030,7 @@
 
             <ErrMsg msg={error} />
 
-            {/* Loading state */}
+            {/* Loading */}
             {loading && (
               <Card className="p-10">
                 <div className="flex flex-col items-center gap-3">
@@ -811,7 +1043,7 @@
               </Card>
             )}
 
-            {/* Empty state */}
+            {/* Empty */}
             {!loading && data && data.records.length === 0 && (
               <Card className="p-8 text-center">
                 <div className="text-3xl mb-2">🔍</div>
@@ -825,6 +1057,7 @@
             {/* Dashboard content */}
             {!loading && data && data.records.length > 0 && stats && (
               <>
+                {/* KPI cards */}
                 <div className="grid grid-cols-2 lg:grid-cols-4 gap-3">
                   <KpiCard label={`Total (${days}d)`} value={fmt(stats.total, data.currency)} sub={`${data.from} to ${data.to}`} />
                   <KpiCard label="Daily avg" value={fmt(stats.avgDaily, data.currency)} />
@@ -835,9 +1068,24 @@
                     trend={stats.trendPct} />
                 </div>
 
-                <TimeSeriesChart data={ts} currency={data.currency} />
-                <GroupChart records={data.records} currency={data.currency} />
-                <MoversCard records={data.records} days={days} currency={data.currency} />
+                {/* Time series — uses shared groupOpt + local bucket/style */}
+                <TimeSeriesChart
+                  records={data.records}
+                  currency={data.currency}
+                  from={data.from}
+                  to={data.to}
+                  days={days}
+                  groupOpt={groupOpt}
+                  bucket={bucket}
+                  setBucket={setBucket}
+                  style={style}
+                  setStyle={setStyle}
+                />
+
+                {/* Bar chart — uses shared groupOpt */}
+                <GroupChart records={data.records} currency={data.currency} groupOpt={groupOpt} />
+
+                <MoversCard records={data.records} days={days} currency={data.currency} groupOpt={groupOpt} />
                 <DetailTable records={data.records} currency={data.currency} total={stats.total} />
               </>
             )}
