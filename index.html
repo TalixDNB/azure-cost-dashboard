@@ -543,7 +543,9 @@
     }
 
     function Card({ children, className = "" }) {
-      return <div className={cx("bg-white rounded-xl border border-slate-200 shadow-sm overflow-hidden", className)}>{children}</div>;
+      const dark = useDark();
+      return <div className={cx("rounded-xl border shadow-sm overflow-hidden",
+        dark ? "bg-gray-800 border-gray-700" : "bg-white border-slate-200", className)}>{children}</div>;
     }
 
     function Btn({ children, onClick, variant = "primary", disabled, full, small }) {
@@ -567,9 +569,11 @@
     }
 
     function ErrMsg({ msg }) {
+      const dark = useDark();
       if (!msg) return null;
       return (
-        <div className="p-3.5 rounded-lg bg-red-50 border border-red-200 text-sm text-red-800">
+        <div className={cx("p-3.5 rounded-lg border text-sm",
+          dark ? "bg-red-950 border-red-800 text-red-300" : "bg-red-50 border-red-200 text-red-800")}>
           ⚠ {msg}
         </div>
       );
@@ -674,18 +678,19 @@
     // Dashboard: KPI Card
     // =========================================================================
     function KpiCard({ label, value, sub, trend }) {
-      const color = trend == null ? "" : trend > 0 ? "text-rose-600" : "text-emerald-600";
+      const dark = useDark();
+      const color = trend == null ? "" : trend > 0 ? (dark ? "text-rose-400" : "text-rose-600") : (dark ? "text-emerald-400" : "text-emerald-600");
       return (
-        <Card className="p-2.5 sm:p-3">
-          <div className="text-xs text-slate-400 font-medium truncate leading-tight">{label}</div>
-          <div className="mt-0.5 text-base sm:text-lg font-bold text-slate-900 truncate leading-tight">{value}</div>
-          {sub && <div className="text-xs text-slate-400 truncate hidden sm:block">{sub}</div>}
+        <div className={cx("rounded-xl border shadow-sm p-2.5", dark ? "bg-gray-800 border-gray-700" : "bg-white border-slate-200")}>
+          <div className={cx("text-xs font-medium leading-tight", dark ? "text-gray-400" : "text-slate-400")}>{label}</div>
+          <div className={cx("mt-0.5 font-bold leading-tight", dark ? "text-gray-100" : "text-slate-900",
+            value && value.length > 8 ? "text-sm" : "text-base")}>{value}</div>
           {trend != null && (
             <div className={cx("text-xs font-semibold mt-0.5 leading-tight", color)}>
               {trend > 0 ? "▲" : "▼"}{Math.abs(trend).toFixed(0)}%
             </div>
           )}
-        </Card>
+        </div>
       );
     }
 
@@ -693,11 +698,47 @@
     // Dashboard: Charts
     // =========================================================================
     const GROUP_OPTS = [
-      { id: "service",       label: "Service",    fn: r => r.service },
-      { id: "resourceGroup", label: "Res. group", fn: r => r.resourceGroup },
-      { id: "resourceName",  label: "Resource",   fn: r => r.resourceName },
-      { id: "location",      label: "Location",   fn: r => r.location },
+      { id: "service",       label: "Service",        plural: "services",        fn: r => r.service },
+      { id: "resourceGroup", label: "Resource group",  plural: "resource groups", fn: r => r.resourceGroup },
+      { id: "resourceName",  label: "Resource",        plural: "resources",       fn: r => r.resourceName },
+      { id: "location",      label: "Location",        plural: "locations",       fn: r => r.location },
     ];
+
+    // Dark mode context
+    const DarkCtx = React.createContext(false);
+    const useDark = () => React.useContext(DarkCtx);
+
+    // Collapsible section wrapper
+    function Section({ title, right, storageKey, children }) {
+      const dark = useDark();
+      const [open, setOpen] = useState(() => {
+        try { const v = localStorage.getItem("section:" + storageKey); return v === null ? true : v === "1"; }
+        catch { return true; }
+      });
+      const toggle = () => {
+        const next = !open;
+        setOpen(next);
+        try { localStorage.setItem("section:" + storageKey, next ? "1" : "0"); } catch {}
+      };
+      return (
+        <div className={cx("rounded-xl border shadow-sm overflow-hidden", dark ? "bg-gray-800 border-gray-700" : "bg-white border-slate-200")}>
+          <button onClick={toggle} className={cx(
+            "w-full flex items-center justify-between px-4 py-3 text-left transition-colors",
+            dark ? "hover:bg-gray-700" : "hover:bg-slate-50"
+          )}>
+            <div className="flex items-center gap-2">
+              <span className={cx("text-sm font-semibold", dark ? "text-gray-100" : "text-slate-700")}>{title}</span>
+              {right && <span className={cx("text-xs", dark ? "text-gray-400" : "text-slate-400")}>{right}</span>}
+            </div>
+            <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.5"
+              strokeLinecap="round" className={cx("transition-transform flex-shrink-0", dark ? "text-gray-400" : "text-slate-400", open ? "" : "-rotate-90")}>
+              <path d="M6 9l6 6 6-6"/>
+            </svg>
+          </button>
+          {open && <div className={cx("border-t", dark ? "border-gray-700" : "border-slate-100")}>{children}</div>}
+        </div>
+      );
+    }
 
     function TimeSeriesChart({ records, currency, from, to, days, groupOpt, bucket, setBucket, style, setStyle, showTotal, setShowTotal }) {
       // Decide what data to render
@@ -756,15 +797,17 @@
         );
       };
 
-      return (
-        <Card className="p-4">
-          <div className="flex flex-wrap items-center justify-between gap-2 mb-2">
-            <div className="text-sm font-semibold text-slate-700">
-              {isGrouped ? `Cost by ${groupOpt.label.toLowerCase()}` : "Daily cost"}
-              <span className="text-xs text-slate-400 font-normal ml-2">({BUCKET_OPTS.find(b => b.id === bucket).label.toLowerCase()})</span>
-            </div>
-          </div>
+      const dark = useDark();
+      const gridColor = dark ? "#374151" : "#f1f5f9";
+      const tickColor = dark ? "#9ca3af" : "#94a3b8";
+      const tooltipStyle = dark ? { background: "#1f2937", border: "1px solid #374151", borderRadius: 8, fontSize: 12 }
+                                : { borderRadius: 8, fontSize: 12 };
+      const tsTitle = isGrouped ? `Cost by ${groupOpt.label.toLowerCase()}` : "Daily cost";
+      const tsBucketLabel = BUCKET_OPTS.find(b => b.id === bucket).label.toLowerCase();
 
+      return (
+        <Section title={tsTitle} right={`(${tsBucketLabel})`} storageKey="time-series">
+          <div className={cx("p-4", dark ? "bg-gray-800" : "bg-white")}>
           {/* Controls row: bucket + style toggle */}
           <div className="flex flex-wrap items-center gap-2 mb-3">
             <div className="flex gap-1 bg-slate-100 rounded-md p-0.5">
@@ -796,9 +839,9 @@
             <ResponsiveContainer width="100%" height="100%">
               {(isGrouped && isStacked) ? (
                 <AreaChart data={series.rows} margin={{ top: 5, right: 5, bottom: 0, left: -10 }}>
-                  <CartesianGrid strokeDasharray="3 3" stroke="#f1f5f9" />
-                  <XAxis dataKey="label" tick={{ fontSize: 10, fill: "#94a3b8" }} interval="preserveStartEnd" />
-                  <YAxis tick={{ fontSize: 10, fill: "#94a3b8" }} tickFormatter={v => fmtCompact(v, currency)} width={55} />
+                  <CartesianGrid strokeDasharray="3 3" stroke={gridColor} />
+                  <XAxis dataKey="label" tick={{ fontSize: 10, fill: tickColor }} interval="preserveStartEnd" />
+                  <YAxis tick={{ fontSize: 10, fill: tickColor }} tickFormatter={v => fmtCompact(v, currency)} width={55} />
                   <Tooltip content={customTooltip} />
                   {series.groupNames.map((g, i) => (
                     <Area key={g} type="monotone" dataKey={g} stackId="1"
@@ -807,9 +850,9 @@
                 </AreaChart>
               ) : (
                 <LineChart data={series.rows} margin={{ top: 5, right: 5, bottom: 0, left: -10 }}>
-                  <CartesianGrid strokeDasharray="3 3" stroke="#f1f5f9" />
-                  <XAxis dataKey="label" tick={{ fontSize: 10, fill: "#94a3b8" }} interval="preserveStartEnd" />
-                  <YAxis tick={{ fontSize: 10, fill: "#94a3b8" }} tickFormatter={v => fmtCompact(v, currency)} width={55} />
+                  <CartesianGrid strokeDasharray="3 3" stroke={gridColor} />
+                  <XAxis dataKey="label" tick={{ fontSize: 10, fill: tickColor }} interval="preserveStartEnd" />
+                  <YAxis tick={{ fontSize: 10, fill: tickColor }} tickFormatter={v => fmtCompact(v, currency)} width={55} />
                   <Tooltip content={customTooltip} />
                   {series.groupNames.map((g, i) => (
                     <Line key={g} type="monotone" dataKey={g}
@@ -823,141 +866,149 @@
 
           {/* Custom legend below the chart, only when grouped */}
           {isGrouped && (
-            <div className="flex flex-wrap gap-x-3 gap-y-1.5 mt-3 pt-3 border-t border-slate-100">
+            <div className={cx("flex flex-wrap gap-x-3 gap-y-1.5 mt-3 pt-3 border-t", dark ? "border-gray-700" : "border-slate-100")}>
               {series.groupNames.map((g, i) => (
-                <div key={g} className="flex items-center gap-1.5 text-xs text-slate-600 max-w-full">
+                <div key={g} className={cx("flex items-center gap-1.5 text-xs max-w-full", dark ? "text-gray-400" : "text-slate-600")}>
                   <span className="w-2.5 h-2.5 rounded-sm flex-shrink-0" style={{ background: PALETTE[i % PALETTE.length] }} />
                   <span className="truncate" title={g}>{g}</span>
                 </div>
               ))}
             </div>
           )}
-        </Card>
+          </div>
+        </Section>
       );
     }
 
     function GroupChart({ records, currency, groupOpt }) {
+      const dark = useDark();
       const data = useMemo(() => groupSum(records, groupOpt.fn).slice(0, 8), [records, groupOpt.id]);
+      const gridColor = dark ? "#374151" : "#f1f5f9";
+      const tickColor = dark ? "#9ca3af" : "#94a3b8";
+      const labelColor = dark ? "#d1d5db" : "#334155";
+      const tooltipStyle = dark ? { background: "#1f2937", border: "1px solid #374151", borderRadius: 8, fontSize: 12 }
+                                : { borderRadius: 8, fontSize: 12 };
       return (
-        <Card className="p-4">
-          <div className="flex items-center justify-between mb-3">
-            <div className="text-sm font-semibold text-slate-700">
-              Top by {groupOpt.label.toLowerCase()}
+        <Section title={`Top by ${groupOpt.label.toLowerCase()}`} right="Top 8" storageKey="group-chart">
+          <div className={cx("p-4", dark ? "bg-gray-800" : "bg-white")}>
+            <div style={{ height: 260 }}>
+              {data.length === 0
+                ? <div className={cx("h-full flex items-center justify-center text-sm", dark ? "text-gray-500" : "text-slate-400")}>No data</div>
+                : (
+                  <ResponsiveContainer width="100%" height="100%">
+                    <BarChart data={data} layout="vertical" margin={{ top: 0, right: 10, bottom: 0, left: 0 }}>
+                      <CartesianGrid strokeDasharray="3 3" stroke={gridColor} horizontal={false} />
+                      <XAxis type="number" tick={{ fontSize: 10, fill: tickColor }} tickFormatter={v => fmtCompact(v, currency)} />
+                      <YAxis type="category" dataKey="name" tick={{ fontSize: 10, fill: labelColor }} width={110} />
+                      <Tooltip formatter={v => [fmt(v, currency), "Cost"]} contentStyle={tooltipStyle} />
+                      <Bar dataKey="value" radius={[0, 4, 4, 0]}>
+                        {data.map((_, i) => <Cell key={i} fill={PALETTE[i % PALETTE.length]} />)}
+                      </Bar>
+                    </BarChart>
+                  </ResponsiveContainer>
+                )
+              }
             </div>
-            <span className="text-xs text-slate-400">Top 8</span>
           </div>
-          <div style={{ height: 260 }}>
-            {data.length === 0
-              ? <div className="h-full flex items-center justify-center text-sm text-slate-400">No data</div>
-              : (
-                <ResponsiveContainer width="100%" height="100%">
-                  <BarChart data={data} layout="vertical" margin={{ top: 0, right: 10, bottom: 0, left: 0 }}>
-                    <CartesianGrid strokeDasharray="3 3" stroke="#f1f5f9" horizontal={false} />
-                    <XAxis type="number" tick={{ fontSize: 10, fill: "#94a3b8" }} tickFormatter={v => fmtCompact(v, currency)} />
-                    <YAxis type="category" dataKey="name" tick={{ fontSize: 10, fill: "#334155" }} width={110} />
-                    <Tooltip formatter={v => [fmt(v, currency), "Cost"]} contentStyle={{ fontSize: 12, borderRadius: 8 }} />
-                    <Bar dataKey="value" radius={[0, 4, 4, 0]}>
-                      {data.map((_, i) => <Cell key={i} fill={PALETTE[i % PALETTE.length]} />)}
-                    </Bar>
-                  </BarChart>
-                </ResponsiveContainer>
-              )
-            }
-          </div>
-        </Card>
+        </Section>
       );
     }
 
     function MoversCard({ records, days, currency, groupOpt }) {
+      const dark = useDark();
       const { increasing, decreasing } = useMemo(
         () => calcMovers(records, days, groupOpt.fn),
         [records, days, groupOpt.id]
       );
+      const riseColor = dark ? "text-rose-400" : "text-rose-600";
+      const fallColor = dark ? "text-emerald-400" : "text-emerald-600";
+      const muted = dark ? "text-gray-500" : "text-slate-400";
+      const txt = dark ? "text-gray-200" : "text-slate-700";
       return (
-        <Card className="p-4">
-          <div className="flex items-center justify-between mb-1">
-            <div className="text-sm font-semibold text-slate-700">Top movers</div>
-            <span className="text-xs text-slate-400">by {groupOpt.label.toLowerCase()}</span>
-          </div>
-          <p className="text-xs text-slate-400 mb-3">Second half vs first half of the period</p>
-          <div className="grid grid-cols-1 sm:grid-cols-2 gap-4">
-            <div>
-              <div className="text-xs font-semibold text-rose-600 mb-2">▲ Increased</div>
-              {increasing.length === 0
-                ? <p className="text-xs text-slate-400">None above threshold</p>
-                : increasing.map(m => (
-                  <div key={m.name} className="flex items-center justify-between py-1 text-sm gap-2">
-                    <span className="truncate text-slate-700" title={m.name}>{m.name}</span>
-                    <span className="flex-shrink-0 text-rose-600 font-semibold tabular-nums">+{fmt(m.delta, currency)}</span>
-                  </div>
-                ))
-              }
-            </div>
-            <div>
-              <div className="text-xs font-semibold text-emerald-600 mb-2">▼ Decreased</div>
-              {decreasing.length === 0
-                ? <p className="text-xs text-slate-400">None above threshold</p>
-                : decreasing.map(m => (
-                  <div key={m.name} className="flex items-center justify-between py-1 text-sm gap-2">
-                    <span className="truncate text-slate-700" title={m.name}>{m.name}</span>
-                    <span className="flex-shrink-0 text-emerald-600 font-semibold tabular-nums">{fmt(m.delta, currency)}</span>
-                  </div>
-                ))
-              }
+        <Section title="Top movers" right={`by ${groupOpt.label.toLowerCase()}`} storageKey="movers">
+          <div className={cx("p-4", dark ? "bg-gray-800" : "bg-white")}>
+            <p className={cx("text-xs mb-3", muted)}>Second half vs first half of the period</p>
+            <div className="grid grid-cols-1 sm:grid-cols-2 gap-4">
+              <div>
+                <div className={cx("text-xs font-semibold mb-2", riseColor)}>▲ Increased</div>
+                {increasing.length === 0
+                  ? <p className={cx("text-xs", muted)}>None above threshold</p>
+                  : increasing.map(m => (
+                    <div key={m.name} className="flex items-center justify-between py-1 text-sm gap-2">
+                      <span className={cx("truncate", txt)} title={m.name}>{m.name}</span>
+                      <span className={cx("flex-shrink-0 font-semibold tabular-nums", riseColor)}>+{fmt(m.delta, currency)}</span>
+                    </div>
+                  ))
+                }
+              </div>
+              <div>
+                <div className={cx("text-xs font-semibold mb-2", fallColor)}>▼ Decreased</div>
+                {decreasing.length === 0
+                  ? <p className={cx("text-xs", muted)}>None above threshold</p>
+                  : decreasing.map(m => (
+                    <div key={m.name} className="flex items-center justify-between py-1 text-sm gap-2">
+                      <span className={cx("truncate", txt)} title={m.name}>{m.name}</span>
+                      <span className={cx("flex-shrink-0 font-semibold tabular-nums", fallColor)}>{fmt(m.delta, currency)}</span>
+                    </div>
+                  ))
+                }
+              </div>
             </div>
           </div>
-        </Card>
+        </Section>
       );
     }
 
-    function DetailTable({ records, currency, total }) {
+    function DetailTable({ records, currency, total, groupOpt }) {
+      const dark = useDark();
       const [q, setQ] = useState("");
       const rows = useMemo(() => {
         const map = {};
         for (const r of records) {
-          const k = `${r.resourceName}||${r.resourceGroup}`;
-          if (!map[k]) map[k] = { name: r.resourceName, rg: r.resourceGroup, service: r.service, cost: 0 };
+          const k = groupOpt.fn(r) || "—";
+          if (!map[k]) map[k] = { name: k, cost: 0 };
           map[k].cost += r.cost;
         }
         let arr = Object.values(map).sort((a, b) => b.cost - a.cost);
         if (q) {
           const lq = q.toLowerCase();
-          arr = arr.filter(r =>
-            r.name.toLowerCase().includes(lq) ||
-            r.rg.toLowerCase().includes(lq) ||
-            r.service.toLowerCase().includes(lq)
-          );
+          arr = arr.filter(r => r.name.toLowerCase().includes(lq));
         }
         return arr;
-      }, [records, q]);
+      }, [records, q, groupOpt.id]);
+
+      const th = cx("px-4 py-2 text-left font-medium uppercase tracking-wide text-xs",
+        dark ? "text-gray-400" : "text-slate-500");
+      const thR = cx("px-4 py-2 text-right font-medium uppercase tracking-wide text-xs",
+        dark ? "text-gray-400" : "text-slate-500");
 
       return (
-        <Card>
-          <div className="px-4 py-3 border-b border-slate-100 flex flex-wrap items-center justify-between gap-2">
-            <div className="text-sm font-semibold text-slate-700">All resources</div>
-            <input type="text" placeholder="Search…" value={q} onChange={e => setQ(e.target.value)}
-              className="text-sm border border-slate-200 rounded-md px-3 py-1.5 w-full sm:w-44 focus:outline-none focus:border-blue-400" />
+        <Section title={`All ${groupOpt.plural}`} storageKey="detail-table">
+          <div className={cx("px-4 py-2.5 flex items-center gap-2", dark ? "bg-gray-800" : "bg-white")}>
+            <input type="text" placeholder={`Search ${groupOpt.plural}…`} value={q}
+              onChange={e => setQ(e.target.value)}
+              className={cx("text-sm rounded-md px-3 py-1.5 w-full focus:outline-none border",
+                dark ? "bg-gray-700 border-gray-600 text-gray-100 placeholder-gray-500 focus:border-blue-500"
+                     : "border-slate-200 focus:border-blue-400")} />
           </div>
           <div className="overflow-x-auto">
             <table className="w-full text-sm">
-              <thead className="bg-slate-50 text-xs text-slate-500 uppercase tracking-wide">
+              <thead className={cx(dark ? "bg-gray-900" : "bg-slate-50")}>
                 <tr>
-                  <th className="px-4 py-2 text-left font-medium">Resource</th>
-                  <th className="px-4 py-2 text-left font-medium hidden sm:table-cell">Service</th>
-                  <th className="px-4 py-2 text-right font-medium">Cost</th>
-                  <th className="px-4 py-2 text-right font-medium hidden sm:table-cell">% of total</th>
+                  <th className={th}>{groupOpt.label}</th>
+                  <th className={thR}>Cost</th>
+                  <th className={cx(thR, "hidden sm:table-cell")}>% of total</th>
                 </tr>
               </thead>
-              <tbody className="divide-y divide-slate-100">
+              <tbody className={cx("divide-y", dark ? "divide-gray-700" : "divide-slate-100")}>
                 {rows.length === 0 && (
-                  <tr><td colSpan={4} className="px-4 py-8 text-center text-slate-400 text-sm">No results</td></tr>
+                  <tr><td colSpan={3} className={cx("px-4 py-8 text-center text-sm", dark ? "text-gray-500" : "text-slate-400")}>No results</td></tr>
                 )}
                 {rows.slice(0, 100).map((r, i) => (
-                  <tr key={i} className="hover:bg-slate-50">
-                    <td className="px-4 py-2.5 font-medium text-slate-900 max-w-[160px] truncate">{r.name}</td>
-                    <td className="px-4 py-2.5 text-slate-500 hidden sm:table-cell">{r.service}</td>
-                    <td className="px-4 py-2.5 text-right tabular-nums text-slate-900">{fmt(r.cost, currency)}</td>
-                    <td className="px-4 py-2.5 text-right text-slate-400 tabular-nums hidden sm:table-cell">
+                  <tr key={i} className={cx("transition-colors", dark ? "hover:bg-gray-700" : "hover:bg-slate-50")}>
+                    <td className={cx("px-4 py-2.5 font-medium max-w-[200px] truncate", dark ? "text-gray-200" : "text-slate-900")} title={r.name}>{r.name}</td>
+                    <td className={cx("px-4 py-2.5 text-right tabular-nums", dark ? "text-gray-200" : "text-slate-900")}>{fmt(r.cost, currency)}</td>
+                    <td className={cx("px-4 py-2.5 text-right tabular-nums hidden sm:table-cell", dark ? "text-gray-500" : "text-slate-400")}>
                       {total > 0 ? ((r.cost / total) * 100).toFixed(1) + "%" : "—"}
                     </td>
                   </tr>
@@ -965,12 +1016,12 @@
               </tbody>
             </table>
             {rows.length > 100 && (
-              <p className="px-4 py-2.5 text-center text-xs text-slate-400 bg-slate-50">
+              <p className={cx("px-4 py-2.5 text-center text-xs", dark ? "text-gray-500 bg-gray-900" : "text-slate-400 bg-slate-50")}>
                 Showing top 100 of {rows.length}
               </p>
             )}
           </div>
-        </Card>
+        </Section>
       );
     }
 
@@ -984,6 +1035,9 @@
       const [progress, setProgress] = useState("");
       const [error, setError]   = useState(null);
       const [testMode, setTestMode] = useState(false);
+      const [dark, setDark] = useState(() => {
+        try { return localStorage.getItem("dark") === "1"; } catch { return false; }
+      });
 
       // Shared grouping — controls time-series, bar chart AND movers
       const [groupId, setGroupId] = useState("service");
@@ -1029,70 +1083,91 @@
       const cacheAge = data ? Math.round((Date.now() - data.fetchedAt) / 60000) : 0;
       const groupOpt = GROUP_OPTS.find(o => o.id === groupId) || GROUP_OPTS[0];
 
+      // Dark mode classes
+      const bg    = dark ? "bg-gray-900" : "bg-slate-50";
+      const hdrBg = dark ? "bg-gray-900 border-gray-700" : "bg-white border-slate-200";
+      const filBg = dark ? "bg-gray-800 border-gray-700" : "bg-slate-50 border-slate-100";
+      const segBg = dark ? "bg-gray-700 border-gray-600" : "bg-white border-slate-200";
+      const segAct = dark ? "bg-gray-500 text-white" : "bg-slate-900 text-white";
+      const segIn  = dark ? "text-gray-400 hover:bg-gray-600" : "text-slate-500 hover:bg-slate-100";
+      const grpAct = "bg-blue-600 text-white";
+      const grpIn  = dark ? "text-gray-400 hover:bg-gray-600" : "text-slate-500 hover:bg-slate-100";
+
       return (
-        <div className="min-h-screen bg-slate-50">
+        <DarkCtx.Provider value={dark}>
+        <div className={cx("min-h-screen transition-colors duration-200", bg)}>
 
           {/* ── Top bar ─────────────────────────────────────────────────────── */}
-          <div className="bg-white border-b border-slate-200 sticky top-0 z-20 shadow-sm">
+          <div className={cx("border-b sticky top-0 z-20 shadow-sm", hdrBg)}>
             <div className="max-w-5xl mx-auto px-4 py-2.5 flex items-center justify-between gap-2">
               <div className="flex items-center gap-2">
-                <svg width="18" height="18" fill="none" stroke="#2563eb" strokeWidth="2" viewBox="0 0 24 24">
+                <svg width="18" height="18" fill="none" stroke="#3b82f6" strokeWidth="2" viewBox="0 0 24 24">
                   <path d="M18 10h-1.26A8 8 0 1 0 9 20h9a5 5 0 0 0 0-10z"/>
                 </svg>
-                <span className="font-semibold text-slate-900 text-sm">Azure Cost</span>
+                <span className={cx("font-semibold text-sm", dark ? "text-gray-100" : "text-slate-900")}>Azure Cost</span>
                 {data && data.isTest && (
                   <span className="text-xs bg-amber-100 text-amber-700 px-1.5 py-0.5 rounded font-medium">TEST</span>
                 )}
               </div>
               <div className="flex items-center gap-1.5">
+                {/* Dark mode toggle */}
+                <button onClick={() => { const n = !dark; setDark(n); try { localStorage.setItem("dark", n?"1":"0"); } catch {} }}
+                  className={cx("w-7 h-7 flex items-center justify-center rounded-md text-lg transition-colors",
+                    dark ? "bg-gray-700 hover:bg-gray-600" : "bg-slate-100 hover:bg-slate-200")}>
+                  {dark ? "☀️" : "🌙"}
+                </button>
                 <button onClick={toggleTestMode}
                   className={cx("text-xs px-2 py-1 rounded border font-medium transition-colors",
-                    testMode ? "bg-amber-500 text-white border-amber-500" : "border-slate-200 text-slate-500 hover:bg-slate-50")}>
+                    testMode ? "bg-amber-500 text-white border-amber-500"
+                             : dark ? "border-gray-600 text-gray-400 hover:bg-gray-700"
+                             : "border-slate-200 text-slate-500 hover:bg-slate-50")}>
                   {testMode ? "Test data" : "Test"}
                 </button>
-                <Btn variant="secondary" onClick={onChangeSubs} small>Subs</Btn>
-                <Btn variant="ghost" onClick={onSignOut} small>Out</Btn>
+                <button onClick={onChangeSubs} className={cx("text-xs px-2 py-1 rounded border font-medium transition-colors",
+                  dark ? "border-gray-600 text-gray-400 hover:bg-gray-700" : "border-slate-200 text-slate-600 hover:bg-slate-50")}>
+                  Subs
+                </button>
+                <button onClick={onSignOut} className={cx("text-xs px-2 py-1 rounded font-medium transition-colors",
+                  dark ? "text-gray-500 hover:bg-gray-700" : "text-slate-400 hover:bg-slate-100")}>
+                  Out
+                </button>
               </div>
             </div>
 
-            {/* ── Sticky filter bar ────────────────────────────────────────── */}
-            <div className="border-t border-slate-100 bg-slate-50">
-              <div className="max-w-5xl mx-auto px-4 py-2 flex items-center gap-2 overflow-x-auto">
-                {/* Date range */}
-                <div className="flex gap-0.5 bg-white border border-slate-200 rounded-md p-0.5 flex-shrink-0">
+            {/* ── Filter bar: 2 rows, no overflow ──────────────────────────── */}
+            <div className={cx("border-t px-4 py-2 space-y-2", filBg)}>
+              {/* Row 1: date range + status + refresh */}
+              <div className="flex items-center gap-2">
+                <div className={cx("flex gap-0.5 rounded-md p-0.5 border flex-shrink-0", segBg)}>
                   {[7, 30, 90].map(n => (
                     <button key={n} onClick={() => setDays(n)}
-                      className={cx("px-2.5 py-1 text-xs font-semibold rounded transition-colors whitespace-nowrap",
-                        days === n ? "bg-slate-900 text-white" : "text-slate-500 hover:bg-slate-100")}>
+                      className={cx("px-2.5 py-1 text-xs font-semibold rounded transition-colors",
+                        days === n ? segAct : segIn)}>
                       {n}d
                     </button>
                   ))}
                 </div>
-
-                <div className="w-px h-5 bg-slate-200 flex-shrink-0" />
-
-                {/* Grouping */}
-                <div className="flex gap-0.5 bg-white border border-slate-200 rounded-md p-0.5 flex-shrink-0">
-                  {GROUP_OPTS.map(o => (
-                    <button key={o.id} onClick={() => setGroupId(o.id)}
-                      className={cx("px-2.5 py-1 text-xs font-semibold rounded transition-colors whitespace-nowrap",
-                        groupId === o.id ? "bg-blue-600 text-white" : "text-slate-500 hover:bg-slate-100")}>
-                      {o.label}
-                    </button>
-                  ))}
-                </div>
-
                 <div className="flex-1" />
-
-                {/* Status + refresh */}
                 {data && (
-                  <span className="text-xs text-slate-400 flex-shrink-0 hidden sm:block">
-                    {data.isTest ? "Test data" : data.fromCache ? `${cacheAge}m ago` : "Fresh"} · {data.records.length.toLocaleString()}
+                  <span className={cx("text-xs flex-shrink-0 hidden sm:block", dark ? "text-gray-500" : "text-slate-400")}>
+                    {data.isTest ? "Test" : data.fromCache ? `${cacheAge}m ago` : "Fresh"} · {data.records.length.toLocaleString()}
                   </span>
                 )}
-                <Btn variant="secondary" onClick={() => load(true)} disabled={loading} small>
-                  {loading ? <Spinner size={11} /> : "↻"}
-                </Btn>
+                <button onClick={() => load(true)} disabled={loading}
+                  className={cx("text-xs px-2 py-1 rounded border font-medium flex items-center gap-1 transition-colors",
+                    dark ? "border-gray-600 text-gray-400 hover:bg-gray-700" : "border-slate-200 text-slate-600 hover:bg-slate-50")}>
+                  {loading ? <Spinner size={11} /> : "↻"} Refresh
+                </button>
+              </div>
+              {/* Row 2: grouping (full width, wraps naturally) */}
+              <div className={cx("flex gap-0.5 rounded-md p-0.5 border w-full", segBg)}>
+                {GROUP_OPTS.map(o => (
+                  <button key={o.id} onClick={() => setGroupId(o.id)}
+                    className={cx("flex-1 py-1 text-xs font-semibold rounded transition-colors text-center",
+                      groupId === o.id ? grpAct : grpIn)}>
+                    {o.label}
+                  </button>
+                ))}
               </div>
             </div>
           </div>
@@ -1106,8 +1181,8 @@
               <Card className="p-10">
                 <div className="flex flex-col items-center gap-3">
                   <Spinner size={28} className="text-blue-400" />
-                  <div className="text-sm text-slate-600 font-medium">{progress}</div>
-                  <div className="text-xs text-slate-400 text-center max-w-xs">
+                  <div className={cx("text-sm font-medium", dark ? "text-gray-300" : "text-slate-600")}>{progress}</div>
+                  <div className={cx("text-xs text-center max-w-xs", dark ? "text-gray-500" : "text-slate-400")}>
                     First load may take 15–30s — PAYG API paginates 1,000 records at a time.
                   </div>
                 </div>
@@ -1118,8 +1193,8 @@
             {!loading && data && data.records.length === 0 && (
               <Card className="p-8 text-center">
                 <div className="text-3xl mb-2">🔍</div>
-                <h3 className="font-semibold text-slate-700">No cost data found</h3>
-                <p className="text-sm text-slate-500 mt-1">
+                <h3 className={cx("font-semibold", dark ? "text-gray-200" : "text-slate-700")}>No cost data found</h3>
+                <p className={cx("text-sm mt-1", dark ? "text-gray-500" : "text-slate-500")}>
                   No usage records in the last {days} days. Try a wider range or switch to test data.
                 </p>
               </Card>
@@ -1129,7 +1204,7 @@
             {!loading && data && data.records.length > 0 && stats && (
               <>
                 {/* KPI row — compact single row */}
-                <div className="grid grid-cols-4 gap-2">
+                <div className="grid grid-cols-4 gap-2" style={{marginBottom: 0}}>
                   <KpiCard label={`${days}d total`} value={fmt(stats.total, data.currency)} />
                   <KpiCard label="Daily avg"  value={fmt(stats.avgDaily, data.currency)} />
                   <KpiCard label="Peak day"   value={fmt(stats.peakDay.cost, data.currency)} sub={stats.peakDay.date ? stats.peakDay.date.slice(5) : ""} />
@@ -1154,11 +1229,12 @@
                 <GroupChart records={data.records} currency={data.currency} groupOpt={groupOpt} />
 
                 {/* Detail table */}
-                <DetailTable records={data.records} currency={data.currency} total={stats.total} />
+                <DetailTable records={data.records} currency={data.currency} total={stats.total} groupOpt={groupOpt} />
               </>
             )}
           </div>
         </div>
+        </DarkCtx.Provider>
       );
     }
 
