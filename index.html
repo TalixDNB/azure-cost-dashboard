@@ -4,25 +4,85 @@
   <meta charset="UTF-8" />
   <meta name="viewport" content="width=device-width, initial-scale=1.0" />
   <title>Azure Cost Dashboard</title>
-  <script src="https://cdnjs.cloudflare.com/ajax/libs/react/18.2.0/umd/react.production.min.js"></script>
-  <script src="https://cdnjs.cloudflare.com/ajax/libs/react-dom/18.2.0/umd/react-dom.production.min.js"></script>
-  <script src="https://cdnjs.cloudflare.com/ajax/libs/babel-standalone/7.23.5/babel.min.js"></script>
-  <script src="https://unpkg.com/prop-types@15.8.1/prop-types.min.js"></script>
-  <script src="https://unpkg.com/recharts@2.12.7/umd/Recharts.js"></script>
+
+  <!-- Eruda: mobile browser console - tap the circle button (bottom-right) to open -->
+  <script src="https://cdnjs.cloudflare.com/ajax/libs/eruda/3.0.1/eruda.min.js"></script>
+  <script>eruda.init();</script>
+
+  <!-- Visible error overlay in case React never loads -->
+  <script>
+    window.onerror = function(msg, src, line, col, err) {
+      var d = document.getElementById("__err");
+      var m = document.getElementById("__errmsg");
+      if (d && m) { d.style.display="block"; m.textContent += (err ? err.stack : msg) + "\n\n"; }
+    };
+    window.addEventListener("unhandledrejection", function(e) {
+      var d = document.getElementById("__err");
+      var m = document.getElementById("__errmsg");
+      var msg = e.reason ? (e.reason.stack || e.reason.message || String(e.reason)) : String(e);
+      if (d && m) { d.style.display="block"; m.textContent += msg + "\n\n"; }
+    });
+  </script>
+
+  <!-- Core: React + ReactDOM from cdnjs (very reliable) -->
+  <script src="https://cdnjs.cloudflare.com/ajax/libs/react/18.2.0/umd/react.production.min.js" crossorigin="anonymous"></script>
+  <script src="https://cdnjs.cloudflare.com/ajax/libs/react-dom/18.2.0/umd/react-dom.production.min.js" crossorigin="anonymous"></script>
+
+  <!-- Babel for JSX transform -->
+  <script src="https://cdnjs.cloudflare.com/ajax/libs/babel-standalone/7.23.5/babel.min.js" crossorigin="anonymous"></script>
+
+  <!-- Recharts deps: prop-types must come before recharts -->
+  <script src="https://cdnjs.cloudflare.com/ajax/libs/prop-types/15.8.1/prop-types.min.js" crossorigin="anonymous"></script>
+
+  <!-- Recharts from cdnjs -->
+  <script src="https://cdnjs.cloudflare.com/ajax/libs/recharts/2.12.7/Recharts.min.js" crossorigin="anonymous"></script>
+
+  <!-- Tailwind CSS -->
   <script src="https://cdn.tailwindcss.com"></script>
+
   <style>
-    body { margin: 0; font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', sans-serif; }
-    .spin { animation: spin 1s linear infinite; }
-    @keyframes spin { from { transform: rotate(0deg); } to { transform: rotate(360deg); } }
-    .recharts-default-tooltip { border-radius: 8px !important; border: 1px solid #e2e8f0 !important; box-shadow: 0 4px 6px -1px rgba(0,0,0,0.1) !important; }
+    * { box-sizing: border-box; }
+    body { margin: 0; font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif; background: #f8fafc; }
+    .spin { animation: _spin 1s linear infinite; }
+    @keyframes _spin { to { transform: rotate(360deg); } }
   </style>
 </head>
 <body>
-  <div id="root"></div>
+  <div id="__err" style="display:none;position:fixed;top:0;left:0;right:0;bottom:0;background:#fff;z-index:99999;padding:20px;overflow:auto;font-family:monospace;">
+  <h2 style="color:#ef4444;margin:0 0 8px">JavaScript Error</h2>
+  <p style="font-size:13px;color:#64748b;margin:0 0 12px">Something went wrong loading the app. Error details:</p>
+  <pre id="__errmsg" style="background:#fef2f2;border:1px solid #fecaca;padding:12px;border-radius:8px;font-size:12px;white-space:pre-wrap;color:#991b1b;"></pre>
+  <button onclick="location.reload()" style="margin-top:12px;padding:8px 16px;background:#3b82f6;color:white;border:none;border-radius:6px;font-size:14px;cursor:pointer;">Reload</button>
+</div>
+<div id="root"></div>
 
-  <script type="text/babel" data-presets="env,react">
+  <script>
+    // Safety check — if any critical library failed to load, show a message
+    window.addEventListener("load", function() {
+      if (!window.React || !window.ReactDOM || !window.Recharts) {
+        document.getElementById("root").innerHTML =
+          '<div style="padding:40px;text-align:center;color:#ef4444;font-family:sans-serif">' +
+          '<h2>Failed to load dependencies</h2>' +
+          '<p>Please check your internet connection and reload the page.</p>' +
+          '<p style="font-size:12px;color:#94a3b8">Missing: ' +
+          (!window.React ? "React " : "") +
+          (!window.ReactDOM ? "ReactDOM " : "") +
+          (!window.Recharts ? "Recharts" : "") + '</p></div>';
+      }
+    });
+  </script>
+
+  <script type="text/babel">
     const { useState, useEffect, useCallback, useMemo } = React;
-    const { LineChart, Line, BarChart, Bar, XAxis, YAxis, CartesianGrid, Tooltip, ResponsiveContainer, Cell } = Recharts;
+
+    // Pull Recharts components safely
+    const {
+      LineChart, Line,
+      BarChart, Bar,
+      XAxis, YAxis,
+      CartesianGrid, Tooltip,
+      ResponsiveContainer, Cell
+    } = Recharts;
 
     // =========================================================================
     // CONFIG
@@ -34,8 +94,7 @@
     const TOKEN_EP     = `https://login.microsoftonline.com/${TENANT}/oauth2/v2.0/token`;
     const ARM_BASE     = "https://management.azure.com";
     const REDIRECT_URI = "https://talixdnb.github.io/azure-cost-dashboard/";
-
-    const CACHE_TTL_MS = 6 * 60 * 60 * 1000; // 6 hours
+    const CACHE_TTL_MS = 6 * 60 * 60 * 1000;
 
     // =========================================================================
     // PKCE
@@ -50,18 +109,18 @@
     };
 
     // =========================================================================
-    // Storage
+    // Storage (localStorage + in-memory fallback)
     // =========================================================================
-    const mem = {};
+    const _mem = {};
     const kv = {
-      get(k)    { try { return localStorage.getItem(k); } catch { return mem[k] ?? null; } },
+      get(k)    { try { return localStorage.getItem(k); } catch { return _mem[k] ?? null; } },
       set(k, v) { const s = typeof v === "string" ? v : JSON.stringify(v);
-                  try { localStorage.setItem(k, s); } catch { mem[k] = s; } },
-      del(k)    { try { localStorage.removeItem(k); } catch { delete mem[k]; } }
+                  try { localStorage.setItem(k, s); } catch { _mem[k] = s; } },
+      del(k)    { try { localStorage.removeItem(k); } catch { delete _mem[k]; } }
     };
 
     // =========================================================================
-    // Auth helpers
+    // Auth
     // =========================================================================
     function buildAuthUrl(challenge, state) {
       return `${AUTH_EP}?${new URLSearchParams({
@@ -82,7 +141,7 @@
         })
       });
       const json = await res.json();
-      if (!res.ok) throw new Error(json.error_description || json.error || `Token exchange failed: ${res.status}`);
+      if (!res.ok) throw new Error(json.error_description || json.error || `Token exchange failed (${res.status})`);
       return json;
     }
 
@@ -108,33 +167,36 @@
       };
     }
 
-    // Token getter that auto-refreshes when needed.
-    async function ensureValidToken(setToken) {
+    async function ensureValidToken() {
       const raw = kv.get("auth:token");
       if (!raw) throw new Error("Not signed in");
       const t = JSON.parse(raw);
       if (t.expires_at > Date.now() + 60_000) return t.access_token;
-      if (!t.refresh_token) throw new Error("Token expired, please sign in again");
+      if (!t.refresh_token) throw new Error("Session expired, please sign in again");
       const fresh = await doRefresh(t.refresh_token);
       const nt = makeToken(fresh, t.refresh_token);
       kv.set("auth:token", nt);
-      if (setToken) setToken(nt);
       return nt.access_token;
     }
 
     // =========================================================================
-    // ARM
+    // ARM API
     // =========================================================================
     async function armGet(url, at) {
       const fullUrl = url.startsWith("http") ? url : `${ARM_BASE}${url}`;
       const res = await fetch(fullUrl, { headers: { Authorization: `Bearer ${at}` } });
-      if (res.status === 401) throw new Error("TOKEN_EXPIRED");
+      if (res.status === 401) throw new Error("Session expired — please sign in again.");
+      if (res.status === 403) throw new Error("Access denied. Make sure your account has Cost Management Reader on this subscription.");
       if (res.status === 429) {
-        const retry = parseInt(res.headers.get("retry-after") || "30", 10);
-        await new Promise(r => setTimeout(r, retry * 1000));
+        const wait = parseInt(res.headers.get("retry-after") || "15", 10);
+        await new Promise(r => setTimeout(r, wait * 1000));
         return armGet(url, at);
       }
-      if (!res.ok) { const t = await res.text(); throw new Error(`${res.status}: ${t.slice(0, 300)}`); }
+      if (!res.ok) {
+        let msg = `API error ${res.status}`;
+        try { const j = await res.json(); msg = j.error?.message || j.message || msg; } catch {}
+        throw new Error(msg);
+      }
       return res.json();
     }
 
@@ -145,164 +207,130 @@
         .sort((a, b) => a.name.localeCompare(b.name));
     }
 
-    // Fetch all usage details for a subscription within [fromDate, toDate].
-    // PAYG subscriptions use api-version=2019-10-01 with $filter on usageStart/usageEnd.
-    // Paginated via @nextLink — we follow until exhausted.
-    async function fetchUsageDetails(subId, fromDate, toDate, at, onProgress) {
-      const fromIso = fromDate;  // "YYYY-MM-DD"
-      const toIso   = toDate;
-      const filter  = `properties/usageStart ge '${fromIso}' and properties/usageEnd le '${toIso}'`;
+    async function fetchUsageDetails(subId, from, to, at, onProgress) {
+      const filter = `properties/usageStart ge '${from}' and properties/usageEnd le '${to}'`;
       let url = `/subscriptions/${subId}/providers/Microsoft.Consumption/usageDetails`
               + `?api-version=2019-10-01`
               + `&$filter=${encodeURIComponent(filter)}`
               + `&$top=1000`
               + `&metric=actualcost`;
-
       const all = [];
       let pages = 0;
-      while (url) {
+      while (url && pages < 200) {
         const j = await armGet(url, at);
         if (Array.isArray(j.value)) all.push(...j.value);
         url = j.nextLink || null;
         pages++;
-        if (onProgress) onProgress(all.length, pages);
-        // Safety bail-out: PAYG accounts in a 30-day window almost never exceed ~50k records,
-        // but guard against runaway loops.
-        if (pages > 200) break;
+        if (onProgress) onProgress(all.length);
       }
       return all;
     }
 
-    // Normalise a usage detail record into our flat shape.
-    // The API returns "Legacy" (PAYG) or "Modern" records — slightly different schemas.
-    function normaliseRecord(r, subscriptionName) {
+    function normaliseRecord(r, subName) {
       const p = r.properties || {};
-      // Try multiple field names; PAYG (legacy) uses different keys vs MCA (modern)
-      const cost     = p.cost ?? p.costInBillingCurrency ?? p.pretaxCost ?? 0;
+      const cost     = parseFloat(p.cost ?? p.costInBillingCurrency ?? p.pretaxCost ?? 0) || 0;
       const currency = p.billingCurrency ?? p.billingCurrencyCode ?? "USD";
-      const date     = (p.date ?? p.usageStart ?? "").slice(0, 10);  // YYYY-MM-DD
+      const date     = (p.date ?? p.usageStart ?? "").slice(0, 10);
       const service  = p.consumedService ?? p.meterCategory ?? "Unknown";
-      const meterCat = p.meterCategory ?? "Unknown";
-      const meterSub = p.meterSubCategory ?? "";
-      const meterName= p.meterName ?? "";
-      const rg       = (p.resourceGroup ?? p.resourceGroupName ?? "").toLowerCase();
+      const rg       = (p.resourceGroup ?? p.resourceGroupName ?? "—").toLowerCase() || "—";
       const resId    = p.instanceName ?? p.resourceId ?? p.instanceId ?? "";
-      const resName  = resId ? resId.split("/").pop() : (p.instanceName || "—");
+      const resName  = resId ? resId.split("/").pop() || resId : (p.productOrderName || "—");
       const location = p.resourceLocation ?? p.location ?? "—";
-
       return {
-        date, cost: Number(cost) || 0, currency,
-        service, meterCategory: meterCat, meterSubCategory: meterSub, meterName,
-        resourceGroup: rg || "—",
-        resourceId: resId,
-        resourceName: resName,
+        date, cost, currency, service,
+        resourceGroup: rg,
+        resourceName: resName || "—",
         location,
-        subscriptionId: r.id?.split("/")[2] || "",
-        subscriptionName
+        subName
       };
     }
 
     // =========================================================================
-    // Cost data: fetch + cache for selected subs
+    // Cost data fetch + cache
     // =========================================================================
     function cacheKey(subIds, days) {
       return `cost:${[...subIds].sort().join(",")}:${days}`;
     }
 
-    async function getCostData(selectedSubs, allSubs, days, at, opts) {
-      const { force = false, onProgress } = opts || {};
-      const key = cacheKey([...selectedSubs], days);
+    async function getCostData(selected, allSubs, days, onProgress, force) {
+      const key = cacheKey([...selected], days);
       if (!force) {
-        const raw = kv.get(key);
-        if (raw) {
-          try {
-            const cached = JSON.parse(raw);
-            if (Date.now() - cached.fetchedAt < CACHE_TTL_MS) {
-              return { ...cached, fromCache: true };
-            }
-          } catch {}
-        }
+        try {
+          const raw = kv.get(key);
+          if (raw) {
+            const c = JSON.parse(raw);
+            if (Date.now() - c.fetchedAt < CACHE_TTL_MS) return { ...c, fromCache: true };
+          }
+        } catch {}
       }
 
       const today = new Date();
-      const from  = new Date(today);
-      from.setDate(from.getDate() - days);
+      const from  = new Date(today); from.setDate(from.getDate() - days);
       const fromStr = from.toISOString().slice(0, 10);
       const toStr   = today.toISOString().slice(0, 10);
 
+      const at = await ensureValidToken();
       const records = [];
-      const subList = allSubs.filter(s => selectedSubs.has(s.id));
-      let i = 0;
-      for (const sub of subList) {
-        i++;
-        if (onProgress) onProgress(`Fetching ${sub.name} (${i}/${subList.length})…`, 0);
+      const subList = allSubs.filter(s => selected.has(s.id));
+
+      for (let i = 0; i < subList.length; i++) {
+        const sub = subList[i];
+        if (onProgress) onProgress(`Fetching ${sub.name} (${i+1}/${subList.length})…`);
         const raw = await fetchUsageDetails(sub.id, fromStr, toStr, at,
-          (count) => { if (onProgress) onProgress(`Fetching ${sub.name}: ${count} records…`, count); });
+          count => onProgress && onProgress(`${sub.name}: ${count.toLocaleString()} records…`));
         for (const r of raw) records.push(normaliseRecord(r, sub.name));
       }
 
       const currency = records.find(r => r.currency)?.currency || "USD";
-      const data = {
-        currency,
-        fetchedAt: Date.now(),
-        from: fromStr,
-        to:   toStr,
-        days,
-        subIds: [...selectedSubs],
-        records
-      };
-      kv.set(key, JSON.stringify(data));
+      const data = { currency, fetchedAt: Date.now(), from: fromStr, to: toStr, days, records };
+      try { kv.set(key, JSON.stringify(data)); } catch (e) { console.warn("Cache write failed", e); }
       return { ...data, fromCache: false };
     }
 
     // =========================================================================
-    // Aggregation helpers
+    // Data helpers
     // =========================================================================
-    function formatMoney(n, currency) {
-      if (n == null || isNaN(n)) return "—";
+    function fmt(n, currency) {
+      if (!n && n !== 0) return "—";
       try {
-        return new Intl.NumberFormat(undefined, { style: "currency", currency, maximumFractionDigits: 2 }).format(n);
-      } catch {
-        return `${currency} ${n.toFixed(2)}`;
-      }
+        return new Intl.NumberFormat(undefined, {
+          style: "currency", currency,
+          minimumFractionDigits: 2, maximumFractionDigits: 2
+        }).format(n);
+      } catch { return `${currency} ${n.toFixed(2)}`; }
     }
 
-    function formatMoneyCompact(n, currency) {
-      if (n == null || isNaN(n)) return "—";
-      const abs = Math.abs(n);
-      if (abs >= 1000) {
-        try {
-          return new Intl.NumberFormat(undefined, { style: "currency", currency, maximumFractionDigits: 1, notation: "compact" }).format(n);
-        } catch {}
-      }
-      return formatMoney(n, currency);
+    function fmtCompact(n, currency) {
+      if (!n && n !== 0) return "—";
+      try {
+        if (Math.abs(n) >= 1000) {
+          return new Intl.NumberFormat(undefined, {
+            style: "currency", currency, notation: "compact", maximumFractionDigits: 1
+          }).format(n);
+        }
+        return fmt(n, currency);
+      } catch { return fmt(n, currency); }
     }
 
     function groupSum(records, keyFn) {
-      const map = new Map();
+      const map = {};
       for (const r of records) {
         const k = keyFn(r) || "—";
-        map.set(k, (map.get(k) || 0) + r.cost);
+        map[k] = (map[k] || 0) + r.cost;
       }
-      return [...map.entries()].map(([name, value]) => ({ name, value }))
+      return Object.entries(map)
+        .map(([name, value]) => ({ name, value }))
         .sort((a, b) => b.value - a.value);
     }
 
-    function buildTimeSeries(records, fromDate, toDate) {
-      // Build array of { date: "MM-DD", iso: "YYYY-MM-DD", cost: n }
-      const map = new Map();
-      for (const r of records) map.set(r.date, (map.get(r.date) || 0) + r.cost);
-      // Fill gaps
+    function buildTimeSeries(records, from, to) {
+      const map = {};
+      for (const r of records) map[r.date] = (map[r.date] || 0) + r.cost;
       const out = [];
-      const cur = new Date(fromDate);
-      const end = new Date(toDate);
+      const cur = new Date(from), end = new Date(to);
       while (cur <= end) {
         const iso = cur.toISOString().slice(0, 10);
-        out.push({
-          iso,
-          date: iso.slice(5),  // MM-DD
-          cost: map.get(iso) || 0
-        });
+        out.push({ iso, date: iso.slice(5), cost: map[iso] || 0 });
         cur.setDate(cur.getDate() + 1);
       }
       return out;
@@ -310,152 +338,125 @@
 
     function calcStats(records, days) {
       const total = records.reduce((s, r) => s + r.cost, 0);
-      // Highest single day
-      const byDate = new Map();
-      for (const r of records) byDate.set(r.date, (byDate.get(r.date) || 0) + r.cost);
+      const byDate = {};
+      for (const r of records) byDate[r.date] = (byDate[r.date] || 0) + r.cost;
       let peakDay = { date: "—", cost: 0 };
-      for (const [d, c] of byDate.entries()) if (c > peakDay.cost) peakDay = { date: d, cost: c };
-      // Trend: last half vs first half
-      const cutoff = new Date(); cutoff.setDate(cutoff.getDate() - Math.floor(days / 2));
+      for (const [d, c] of Object.entries(byDate)) {
+        if (c > peakDay.cost) peakDay = { date: d, cost: c };
+      }
+      const cutoff = new Date();
+      cutoff.setDate(cutoff.getDate() - Math.floor(days / 2));
       const cutoffIso = cutoff.toISOString().slice(0, 10);
-      let recent = 0, earlier = 0;
-      for (const r of records) (r.date >= cutoffIso ? recent : earlier) += 0; // (placeholder for js destructure quirk)
-      recent = records.filter(r => r.date >= cutoffIso).reduce((s, r) => s + r.cost, 0);
-      earlier = records.filter(r => r.date < cutoffIso).reduce((s, r) => s + r.cost, 0);
-      const trendPct = earlier > 0 ? ((recent - earlier) / earlier) * 100 : null;
+      const recent  = records.filter(r => r.date >= cutoffIso).reduce((s, r) => s + r.cost, 0);
+      const earlier = records.filter(r => r.date <  cutoffIso).reduce((s, r) => s + r.cost, 0);
+      const trendPct = earlier > 0.01 ? ((recent - earlier) / earlier) * 100 : null;
+      return { total, avgDaily: total / days, peakDay, trendPct, recent, earlier };
+    }
+
+    function calcMovers(records, days, keyFn) {
+      const cutoff = new Date();
+      cutoff.setDate(cutoff.getDate() - Math.floor(days / 2));
+      const cutoffIso = cutoff.toISOString().slice(0, 10);
+      const first = {}, second = {};
+      for (const r of records) {
+        const k = keyFn(r) || "—";
+        if (r.date >= cutoffIso) second[k] = (second[k] || 0) + r.cost;
+        else first[k] = (first[k] || 0) + r.cost;
+      }
+      const keys = new Set([...Object.keys(first), ...Object.keys(second)]);
+      const movers = [];
+      for (const k of keys) {
+        const before = first[k]  || 0;
+        const after  = second[k] || 0;
+        const delta  = after - before;
+        if (Math.abs(delta) < 0.50) continue;
+        movers.push({ name: k, before, after, delta });
+      }
       return {
-        total,
-        avgDaily: total / days,
-        peakDay,
-        trendPct,
-        recentHalf: recent,
-        earlierHalf: earlier
+        increasing: movers.filter(m => m.delta > 0).sort((a, b) => b.delta - a.delta).slice(0, 5),
+        decreasing: movers.filter(m => m.delta < 0).sort((a, b) => a.delta - b.delta).slice(0, 5)
       };
     }
 
-    // Top movers: compare sum-by-resource between first half and second half of range.
-    function calcMovers(records, days, groupKey = "resourceName") {
-      const cutoff = new Date(); cutoff.setDate(cutoff.getDate() - Math.floor(days / 2));
-      const cutoffIso = cutoff.toISOString().slice(0, 10);
-      const firstHalf = new Map();
-      const secondHalf = new Map();
-      for (const r of records) {
-        const k = r[groupKey] || "—";
-        if (r.date >= cutoffIso) secondHalf.set(k, (secondHalf.get(k) || 0) + r.cost);
-        else firstHalf.set(k, (firstHalf.get(k) || 0) + r.cost);
-      }
-      const keys = new Set([...firstHalf.keys(), ...secondHalf.keys()]);
-      const movers = [];
-      for (const k of keys) {
-        const before = firstHalf.get(k) || 0;
-        const after  = secondHalf.get(k) || 0;
-        const delta  = after - before;
-        if (Math.abs(delta) < 0.5) continue; // ignore noise below $0.50
-        movers.push({ name: k, before, after, delta, pct: before > 0 ? (delta / before) * 100 : null });
-      }
-      const increasing = movers.filter(m => m.delta > 0).sort((a, b) => b.delta - a.delta).slice(0, 5);
-      const decreasing = movers.filter(m => m.delta < 0).sort((a, b) => a.delta - b.delta).slice(0, 5);
-      return { increasing, decreasing };
-    }
-
     // =========================================================================
-    // UI primitives
+    // UI helpers
     // =========================================================================
     const cx = (...a) => a.filter(Boolean).join(" ");
+    const PALETTE = ["#3b82f6","#10b981","#f59e0b","#ef4444","#8b5cf6","#06b6d4","#ec4899","#84cc16","#f97316","#6366f1"];
 
     function Spinner({ size = 20, className = "" }) {
       return (
-        <svg className={cx("spin", className)} width={size} height={size} viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2">
-          <path d="M12 2v4M12 18v4M4.93 4.93l2.83 2.83M16.24 16.24l2.83 2.83M2 12h4M18 12h4M4.93 19.07l2.83-2.83M16.24 7.76l2.83-2.83" strokeLinecap="round"/>
-        </svg>
+        <div className={cx("spin inline-block", className)} style={{ width: size, height: size }}>
+          <svg width={size} height={size} viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.5">
+            <path d="M12 2v4M12 18v4M4.93 4.93l2.83 2.83M16.24 16.24l2.83 2.83M2 12h4M18 12h4M4.93 19.07l2.83-2.83M16.24 7.76l2.83-2.83" strokeLinecap="round"/>
+          </svg>
+        </div>
       );
     }
 
-    function Icon({ d, size = 18, className = "", strokeWidth = 2 }) {
-      return (
-        <svg width={size} height={size} viewBox="0 0 24 24" fill="none" stroke="currentColor"
-          strokeWidth={strokeWidth} strokeLinecap="round" strokeLinejoin="round" className={className}>
-          {Array.isArray(d) ? d.map((path, i) => <path key={i} d={path} />) : <path d={d} />}
-        </svg>
-      );
+    function Card({ children, className = "" }) {
+      return <div className={cx("bg-white rounded-xl border border-slate-200 shadow-sm overflow-hidden", className)}>{children}</div>;
     }
 
-    const ICONS = {
-      cloud:    "M18 10h-1.26A8 8 0 1 0 9 20h9a5 5 0 0 0 0-10z",
-      login:    "M15 3h4a2 2 0 0 1 2 2v14a2 2 0 0 1-2 2h-4M10 17l5-5-5-5M15 12H3",
-      logout:   "M9 21H5a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h4M16 17l5-5-5-5M21 12H9",
-      check:    "M20 6L9 17l-5-5",
-      alert:    "M10.29 3.86L1.82 18a2 2 0 0 0 1.71 3h16.94a2 2 0 0 0 1.71-3L13.71 3.86a2 2 0 0 0-3.42 0zM12 9v4M12 17h.01",
-      chevron:  "M9 18l6-6-6-6",
-      refresh:  "M23 4v6h-6M1 20v-6h6M3.51 9a9 9 0 0 1 14.85-3.36L23 10M1 14l4.64 4.36A9 9 0 0 0 20.49 15",
-      trendUp:  "M23 6l-9.5 9.5-5-5L1 18M17 6h6v6",
-      trendDn:  "M23 18l-9.5-9.5-5 5L1 6M17 18h6v-6",
-      filter:   "M22 3H2l8 9.46V19l4 2v-8.54L22 3",
-      cog:      "M12 15a3 3 0 1 0 0-6 3 3 0 0 0 0 6zM19.4 15a1.65 1.65 0 0 0 .33 1.82l.06.06a2 2 0 0 1 0 2.83 2 2 0 0 1-2.83 0l-.06-.06a1.65 1.65 0 0 0-1.82-.33 1.65 1.65 0 0 0-1 1.51V21a2 2 0 0 1-4 0v-.09A1.65 1.65 0 0 0 9 19.4a1.65 1.65 0 0 0-1.82.33l-.06.06a2 2 0 0 1-2.83 0 2 2 0 0 1 0-2.83l.06-.06a1.65 1.65 0 0 0 .33-1.82 1.65 1.65 0 0 0-1.51-1H3a2 2 0 0 1 0-4h.09A1.65 1.65 0 0 0 4.6 9a1.65 1.65 0 0 0-.33-1.82l-.06-.06a2 2 0 0 1 0-2.83 2 2 0 0 1 2.83 0l.06.06a1.65 1.65 0 0 0 1.82.33H9a1.65 1.65 0 0 0 1-1.51V3a2 2 0 0 1 4 0v.09a1.65 1.65 0 0 0 1 1.51 1.65 1.65 0 0 0 1.82-.33l.06-.06a2 2 0 0 1 2.83 0 2 2 0 0 1 0 2.83l-.06.06a1.65 1.65 0 0 0-.33 1.82V9a1.65 1.65 0 0 0 1.51 1H21a2 2 0 0 1 0 4h-.09a1.65 1.65 0 0 0-1.51 1z",
-      info:     "M12 22c5.52 0 10-4.48 10-10S17.52 2 12 2 2 6.48 2 12s4.48 10 10 10zM12 16v-4M12 8h.01",
-    };
-
-    function Btn({ children, onClick, variant = "primary", disabled, full, size = "md", className = "" }) {
-      const v = {
+    function Btn({ children, onClick, variant = "primary", disabled, full, small }) {
+      const variants = {
         primary:   "bg-blue-600 text-white hover:bg-blue-700 shadow-sm",
         secondary: "bg-white border border-slate-200 text-slate-700 hover:bg-slate-50 shadow-sm",
-        ghost:     "text-slate-500 hover:text-slate-700 hover:bg-slate-100",
-      };
-      const sz = {
-        sm: "px-2.5 py-1.5 text-xs",
-        md: "px-4 py-2.5 text-sm"
+        ghost:     "text-slate-500 hover:text-slate-800 hover:bg-slate-100"
       };
       return (
         <button onClick={onClick} disabled={disabled}
           className={cx(
-            "inline-flex items-center justify-center gap-2 rounded-lg font-medium transition-all",
-            "disabled:opacity-40 disabled:cursor-not-allowed select-none",
-            v[variant], sz[size], full && "w-full", className
+            "inline-flex items-center justify-center gap-1.5 rounded-lg font-medium transition-colors select-none",
+            "disabled:opacity-40 disabled:cursor-not-allowed",
+            small ? "text-xs px-2.5 py-1.5" : "text-sm px-4 py-2.5",
+            variants[variant],
+            full && "w-full"
           )}>
           {children}
         </button>
       );
     }
 
-    function Card({ children, className = "" }) {
-      return <div className={cx("bg-white rounded-xl border border-slate-200 shadow-sm", className)}>{children}</div>;
-    }
-
-    function ErrBox({ msg }) {
+    function ErrMsg({ msg }) {
       if (!msg) return null;
       return (
-        <div className="flex gap-2 items-start p-3.5 rounded-lg bg-red-50 border border-red-200 text-sm text-red-800">
-          <Icon d={ICONS.alert} size={15} className="flex-shrink-0 mt-0.5 text-red-500" />
-          <span className="break-words">{msg}</span>
+        <div className="p-3.5 rounded-lg bg-red-50 border border-red-200 text-sm text-red-800">
+          ⚠ {msg}
         </div>
       );
     }
 
     // =========================================================================
-    // Sign-in
+    // Screens: Sign-in
     // =========================================================================
     function SignInScreen({ onSignIn, busy, error }) {
       return (
-        <div className="min-h-screen bg-gradient-to-br from-slate-50 to-blue-50 flex items-center justify-center p-6">
-          <div className="w-full max-w-sm space-y-5">
-            <div className="text-center space-y-3">
-              <div className="inline-flex items-center justify-center w-16 h-16 rounded-2xl bg-blue-600 shadow-lg">
-                <Icon d={ICONS.cloud} size={30} className="text-white" />
+        <div className="min-h-screen bg-gradient-to-br from-slate-50 to-blue-50 flex items-center justify-center p-5">
+          <div className="w-full max-w-sm">
+            <div className="text-center mb-8">
+              <div className="inline-flex items-center justify-center w-16 h-16 bg-blue-600 rounded-2xl shadow-lg mb-4">
+                <svg width="30" height="30" fill="none" stroke="white" strokeWidth="2" viewBox="0 0 24 24">
+                  <path d="M18 10h-1.26A8 8 0 1 0 9 20h9a5 5 0 0 0 0-10z"/>
+                </svg>
               </div>
-              <div>
-                <h1 className="text-2xl font-bold text-slate-900 tracking-tight">Azure Cost Dashboard</h1>
-                <p className="text-slate-500 text-sm mt-1">Personal read-only cost tracking</p>
-              </div>
+              <h1 className="text-2xl font-bold text-slate-900">Azure Cost Dashboard</h1>
+              <p className="text-slate-500 text-sm mt-1">Personal read-only cost tracking</p>
             </div>
-            <Card className="p-6 space-y-4">
-              <Btn full onClick={onSignIn} disabled={busy}>
-                {busy ? <Spinner size={16} className="text-white" /> : <Icon d={ICONS.login} size={16} />}
-                Sign in with Microsoft
-              </Btn>
-              <ErrBox msg={error} />
-              <p className="text-xs text-slate-400 text-center leading-relaxed">
-                Read-only access only. We cannot make any changes to your Azure resources.
-              </p>
+
+            <Card className="p-6">
+              <div className="space-y-4">
+                <Btn full onClick={onSignIn} disabled={busy}>
+                  {busy
+                    ? <><Spinner size={15} className="text-white mr-1" /> Signing in…</>
+                    : "Sign in with Microsoft"
+                  }
+                </Btn>
+                <ErrMsg msg={error} />
+                <p className="text-xs text-slate-400 text-center leading-relaxed">
+                  You'll be redirected to Microsoft. Read-only access — we cannot modify your resources.
+                </p>
+              </div>
             </Card>
           </div>
         </div>
@@ -463,56 +464,46 @@
     }
 
     // =========================================================================
-    // Subscription picker
+    // Screens: Subscription picker
     // =========================================================================
     function SubPicker({ subs, selected, onToggle, onSelectAll, onContinue, onSignOut, loading }) {
       const allOn = subs.length > 0 && selected.size === subs.length;
       return (
-        <div className="min-h-screen bg-gradient-to-br from-slate-50 to-blue-50 flex items-center justify-center p-4 sm:p-6">
-          <div className="w-full max-w-lg space-y-4">
-            <div className="text-center">
+        <div className="min-h-screen bg-gradient-to-br from-slate-50 to-blue-50 flex items-center justify-center p-4">
+          <div className="w-full max-w-lg">
+            <div className="text-center mb-4">
               <h2 className="text-xl font-bold text-slate-900">Choose subscriptions</h2>
               <p className="text-slate-500 text-sm mt-1">Select which to include in the dashboard</p>
             </div>
             <Card>
               <div className="px-4 py-3 border-b border-slate-100 flex items-center justify-between">
-                <span className="text-xs font-medium text-slate-400 uppercase tracking-wide">
-                  {loading ? "Loading…" : `${subs.length} found`}
+                <span className="text-xs text-slate-400 font-medium uppercase tracking-wide">
+                  {loading ? "Loading…" : `${subs.length} subscription${subs.length !== 1 ? "s" : ""} found`}
                 </span>
-                {subs.length > 0 && (
+                {subs.length > 1 && (
                   <button onClick={onSelectAll} className="text-xs text-blue-600 hover:text-blue-700 font-medium">
                     {allOn ? "Deselect all" : "Select all"}
                   </button>
                 )}
               </div>
-              <div className="divide-y divide-slate-100 max-h-80 overflow-y-auto">
-                {loading && (
-                  <div className="flex items-center justify-center py-10">
-                    <Spinner className="text-slate-300" />
-                  </div>
-                )}
-                {!loading && subs.length === 0 && (
-                  <p className="text-center py-10 text-sm text-slate-400">No subscriptions found.</p>
-                )}
+              <div className="max-h-72 overflow-y-auto divide-y divide-slate-100">
+                {loading && <div className="flex justify-center py-8"><Spinner className="text-slate-300" /></div>}
+                {!loading && subs.length === 0 && <p className="text-center py-8 text-sm text-slate-400">No subscriptions found.</p>}
                 {!loading && subs.map(s => {
                   const on = selected.has(s.id);
                   return (
                     <button key={s.id} onClick={() => onToggle(s.id)}
                       className="w-full flex items-center gap-3 px-4 py-3 text-left hover:bg-slate-50 transition-colors">
-                      <div className={cx(
-                        "w-5 h-5 rounded border-2 flex items-center justify-center flex-shrink-0 transition-colors",
-                        on ? "bg-blue-600 border-blue-600" : "border-slate-300 bg-white"
-                      )}>
-                        {on && <Icon d={ICONS.check} size={11} className="text-white" strokeWidth={3} />}
+                      <div className={cx("w-5 h-5 rounded border-2 flex-shrink-0 flex items-center justify-center transition-colors",
+                        on ? "bg-blue-600 border-blue-600" : "border-slate-300")}>
+                        {on && <svg width="11" height="11" viewBox="0 0 24 24" fill="none" stroke="white" strokeWidth="3.5" strokeLinecap="round"><path d="M20 6L9 17l-5-5"/></svg>}
                       </div>
                       <div className="flex-1 min-w-0">
                         <div className="text-sm font-medium text-slate-900 truncate">{s.name}</div>
-                        <div className="text-xs text-slate-400 font-mono truncate">{s.id}</div>
+                        <div className="text-xs text-slate-400 font-mono">{s.id}</div>
                       </div>
-                      <span className={cx(
-                        "text-xs px-2 py-0.5 rounded-full font-medium flex-shrink-0",
-                        s.state === "Enabled" ? "bg-emerald-100 text-emerald-700" : "bg-slate-100 text-slate-500"
-                      )}>
+                      <span className={cx("text-xs px-2 py-0.5 rounded-full font-medium flex-shrink-0",
+                        s.state === "Enabled" ? "bg-emerald-100 text-emerald-700" : "bg-slate-100 text-slate-500")}>
                         {s.state}
                       </span>
                     </button>
@@ -520,11 +511,9 @@
                 })}
               </div>
               <div className="px-4 py-3 border-t border-slate-100 flex items-center justify-between">
-                <Btn variant="ghost" onClick={onSignOut}>
-                  <Icon d={ICONS.logout} size={14} /> Sign out
-                </Btn>
+                <Btn variant="ghost" onClick={onSignOut} small>Sign out</Btn>
                 <Btn onClick={onContinue} disabled={selected.size === 0}>
-                  Open dashboard <Icon d={ICONS.chevron} size={14} />
+                  Open dashboard →
                 </Btn>
               </div>
             </Card>
@@ -534,48 +523,46 @@
     }
 
     // =========================================================================
-    // Dashboard pieces
+    // Dashboard: KPI Card
     // =========================================================================
-    function KpiCard({ label, value, sub, trend, trendPct, currency }) {
-      const trendColor = trend == null ? "text-slate-400"
-        : trend > 0 ? "text-rose-600" : "text-emerald-600";
-      const TrendIcon = trend == null ? null : (trend > 0 ? ICONS.trendUp : ICONS.trendDn);
+    function KpiCard({ label, value, sub, trend }) {
+      const color = trend == null ? "" : trend > 0 ? "text-rose-600" : "text-emerald-600";
       return (
         <Card className="p-4">
-          <div className="text-xs text-slate-500 font-medium uppercase tracking-wide">{label}</div>
-          <div className="mt-1 text-2xl font-bold text-slate-900">{value}</div>
-          {sub && <div className="text-xs text-slate-400 mt-0.5">{sub}</div>}
+          <div className="text-xs text-slate-500 uppercase tracking-wide font-medium">{label}</div>
+          <div className="mt-1 text-xl font-bold text-slate-900 truncate">{value}</div>
+          {sub && <div className="text-xs text-slate-400 mt-0.5 truncate">{sub}</div>}
           {trend != null && (
-            <div className={cx("mt-2 flex items-center gap-1 text-xs font-medium", trendColor)}>
-              <Icon d={TrendIcon} size={13} />
-              {trendPct != null ? `${trendPct > 0 ? "+" : ""}${trendPct.toFixed(1)}%` : "—"}
-              <span className="text-slate-400 font-normal ml-0.5">vs prior period</span>
+            <div className={cx("text-xs font-medium mt-1.5", color)}>
+              {trend > 0 ? "▲" : "▼"} {Math.abs(trend).toFixed(1)}% vs prior period
             </div>
           )}
         </Card>
       );
     }
 
-    const PALETTE = ["#3b82f6","#10b981","#f59e0b","#ef4444","#8b5cf6","#06b6d4","#ec4899","#84cc16","#f97316","#6366f1"];
+    // =========================================================================
+    // Dashboard: Charts
+    // =========================================================================
+    const GROUP_OPTS = [
+      { id: "service",       label: "Service",    fn: r => r.service },
+      { id: "resourceGroup", label: "Res. group", fn: r => r.resourceGroup },
+      { id: "resourceName",  label: "Resource",   fn: r => r.resourceName },
+      { id: "location",      label: "Location",   fn: r => r.location },
+    ];
 
     function TimeSeriesChart({ data, currency }) {
       return (
-        <Card className="p-4 sm:p-5">
-          <div className="flex items-center justify-between mb-3">
-            <h3 className="text-sm font-semibold text-slate-700">Daily cost</h3>
-          </div>
-          <div className="h-64">
+        <Card className="p-4">
+          <div className="text-sm font-semibold text-slate-700 mb-3">Daily cost</div>
+          <div style={{ height: 220 }}>
             <ResponsiveContainer width="100%" height="100%">
-              <LineChart data={data} margin={{ top: 5, right: 5, bottom: 5, left: 0 }}>
+              <LineChart data={data} margin={{ top: 5, right: 5, bottom: 0, left: -10 }}>
                 <CartesianGrid strokeDasharray="3 3" stroke="#f1f5f9" />
-                <XAxis dataKey="date" tick={{ fontSize: 11, fill: "#64748b" }} interval="preserveStartEnd" />
-                <YAxis tick={{ fontSize: 11, fill: "#64748b" }} tickFormatter={v => formatMoneyCompact(v, currency)} width={60} />
-                <Tooltip
-                  formatter={v => [formatMoney(v, currency), "Cost"]}
-                  labelFormatter={l => `Date: ${l}`}
-                  contentStyle={{ fontSize: 12 }}
-                />
-                <Line type="monotone" dataKey="cost" stroke="#3b82f6" strokeWidth={2} dot={false} />
+                <XAxis dataKey="date" tick={{ fontSize: 10, fill: "#94a3b8" }} interval="preserveStartEnd" />
+                <YAxis tick={{ fontSize: 10, fill: "#94a3b8" }} tickFormatter={v => fmtCompact(v, currency)} width={55} />
+                <Tooltip formatter={v => [fmt(v, currency), "Cost"]} contentStyle={{ fontSize: 12, borderRadius: 8 }} />
+                <Line type="monotone" dataKey="cost" stroke="#3b82f6" strokeWidth={2} dot={false} activeDot={{ r: 4 }} />
               </LineChart>
             </ResponsiveContainer>
           </div>
@@ -583,184 +570,152 @@
       );
     }
 
-    const GROUPING_OPTIONS = [
-      { id: "service",       label: "Service",    keyFn: r => r.service },
-      { id: "resourceGroup", label: "Resource group", keyFn: r => r.resourceGroup },
-      { id: "resourceName",  label: "Resource",   keyFn: r => r.resourceName },
-      { id: "location",      label: "Location",   keyFn: r => r.location },
-    ];
-
-    function GroupingChart({ records, currency, total }) {
-      const [groupBy, setGroupBy] = useState("service");
-      const grouping = GROUPING_OPTIONS.find(g => g.id === groupBy);
-      const data = useMemo(() => groupSum(records, grouping.keyFn).slice(0, 10), [records, groupBy]);
+    function GroupChart({ records, currency }) {
+      const [g, setG] = useState("service");
+      const opt = GROUP_OPTS.find(o => o.id === g);
+      const data = useMemo(() => groupSum(records, opt.fn).slice(0, 8), [records, g]);
       return (
-        <Card className="p-4 sm:p-5">
+        <Card className="p-4">
           <div className="flex flex-wrap items-center justify-between gap-2 mb-3">
-            <h3 className="text-sm font-semibold text-slate-700">Top 10 by cost</h3>
+            <div className="text-sm font-semibold text-slate-700">Top by cost</div>
             <div className="flex gap-1 flex-wrap">
-              {GROUPING_OPTIONS.map(g => (
-                <button key={g.id} onClick={() => setGroupBy(g.id)}
-                  className={cx(
-                    "text-xs px-2.5 py-1 rounded-md font-medium transition-colors",
-                    groupBy === g.id ? "bg-blue-600 text-white" : "bg-slate-100 text-slate-600 hover:bg-slate-200"
-                  )}>
-                  {g.label}
+              {GROUP_OPTS.map(o => (
+                <button key={o.id} onClick={() => setG(o.id)}
+                  className={cx("text-xs px-2 py-1 rounded-md font-medium transition-colors",
+                    g === o.id ? "bg-blue-600 text-white" : "bg-slate-100 text-slate-600 hover:bg-slate-200")}>
+                  {o.label}
                 </button>
               ))}
             </div>
           </div>
-          <div className="h-72">
-            {data.length === 0 ? (
-              <div className="h-full flex items-center justify-center text-sm text-slate-400">No data</div>
-            ) : (
-              <ResponsiveContainer width="100%" height="100%">
-                <BarChart data={data} layout="vertical" margin={{ top: 5, right: 10, bottom: 5, left: 0 }}>
-                  <CartesianGrid strokeDasharray="3 3" stroke="#f1f5f9" horizontal={false} />
-                  <XAxis type="number" tick={{ fontSize: 11, fill: "#64748b" }} tickFormatter={v => formatMoneyCompact(v, currency)} />
-                  <YAxis type="category" dataKey="name" tick={{ fontSize: 11, fill: "#334155" }} width={120} />
-                  <Tooltip
-                    formatter={v => [formatMoney(v, currency), "Cost"]}
-                    contentStyle={{ fontSize: 12 }}
-                  />
-                  <Bar dataKey="value" radius={[0, 4, 4, 0]}>
-                    {data.map((entry, i) => <Cell key={i} fill={PALETTE[i % PALETTE.length]} />)}
-                  </Bar>
-                </BarChart>
-              </ResponsiveContainer>
-            )}
+          <div style={{ height: 260 }}>
+            {data.length === 0
+              ? <div className="h-full flex items-center justify-center text-sm text-slate-400">No data</div>
+              : (
+                <ResponsiveContainer width="100%" height="100%">
+                  <BarChart data={data} layout="vertical" margin={{ top: 0, right: 10, bottom: 0, left: 0 }}>
+                    <CartesianGrid strokeDasharray="3 3" stroke="#f1f5f9" horizontal={false} />
+                    <XAxis type="number" tick={{ fontSize: 10, fill: "#94a3b8" }} tickFormatter={v => fmtCompact(v, currency)} />
+                    <YAxis type="category" dataKey="name" tick={{ fontSize: 10, fill: "#334155" }} width={110} />
+                    <Tooltip formatter={v => [fmt(v, currency), "Cost"]} contentStyle={{ fontSize: 12, borderRadius: 8 }} />
+                    <Bar dataKey="value" radius={[0, 4, 4, 0]}>
+                      {data.map((_, i) => <Cell key={i} fill={PALETTE[i % PALETTE.length]} />)}
+                    </Bar>
+                  </BarChart>
+                </ResponsiveContainer>
+              )
+            }
           </div>
         </Card>
       );
     }
 
-    function MoversList({ records, days, currency }) {
-      const [groupBy, setGroupBy] = useState("resourceName");
-      const movers = useMemo(() => calcMovers(records, days, groupBy), [records, days, groupBy]);
+    function MoversCard({ records, days, currency }) {
+      const [g, setG] = useState("resourceName");
+      const opt = GROUP_OPTS.find(o => o.id === g);
+      const { increasing, decreasing } = useMemo(() => calcMovers(records, days, opt.fn), [records, days, g]);
       return (
-        <Card className="p-4 sm:p-5">
-          <div className="flex flex-wrap items-center justify-between gap-2 mb-3">
-            <h3 className="text-sm font-semibold text-slate-700">Top movers</h3>
+        <Card className="p-4">
+          <div className="flex flex-wrap items-center justify-between gap-2 mb-1">
+            <div className="text-sm font-semibold text-slate-700">Top movers</div>
             <div className="flex gap-1 flex-wrap">
-              {GROUPING_OPTIONS.map(g => (
-                <button key={g.id} onClick={() => setGroupBy(g.id)}
-                  className={cx(
-                    "text-xs px-2.5 py-1 rounded-md font-medium transition-colors",
-                    groupBy === g.id ? "bg-blue-600 text-white" : "bg-slate-100 text-slate-600 hover:bg-slate-200"
-                  )}>
-                  {g.label}
+              {GROUP_OPTS.map(o => (
+                <button key={o.id} onClick={() => setG(o.id)}
+                  className={cx("text-xs px-2 py-1 rounded-md font-medium transition-colors",
+                    g === o.id ? "bg-blue-600 text-white" : "bg-slate-100 text-slate-600 hover:bg-slate-200")}>
+                  {o.label}
                 </button>
               ))}
             </div>
           </div>
-          <p className="text-xs text-slate-400 mb-3">Comparing second half vs first half of the period.</p>
-          <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
+          <p className="text-xs text-slate-400 mb-3">Second half vs first half of the period</p>
+          <div className="grid grid-cols-1 sm:grid-cols-2 gap-4">
             <div>
-              <div className="flex items-center gap-1.5 mb-2 text-xs font-medium text-rose-600">
-                <Icon d={ICONS.trendUp} size={13} /> Increased
-              </div>
-              {movers.increasing.length === 0 ? (
-                <p className="text-xs text-slate-400">None above threshold</p>
-              ) : (
-                <ul className="space-y-1.5">
-                  {movers.increasing.map(m => (
-                    <li key={m.name} className="flex items-center justify-between gap-2 text-sm">
-                      <span className="truncate text-slate-700">{m.name}</span>
-                      <span className="flex-shrink-0 text-rose-600 font-medium tabular-nums">
-                        +{formatMoney(m.delta, currency)}
-                      </span>
-                    </li>
-                  ))}
-                </ul>
-              )}
+              <div className="text-xs font-semibold text-rose-600 mb-2">▲ Increased</div>
+              {increasing.length === 0
+                ? <p className="text-xs text-slate-400">None above $0.50</p>
+                : increasing.map(m => (
+                  <div key={m.name} className="flex items-center justify-between py-1 text-sm">
+                    <span className="truncate text-slate-700 mr-2">{m.name}</span>
+                    <span className="flex-shrink-0 text-rose-600 font-semibold">+{fmt(m.delta, currency)}</span>
+                  </div>
+                ))
+              }
             </div>
             <div>
-              <div className="flex items-center gap-1.5 mb-2 text-xs font-medium text-emerald-600">
-                <Icon d={ICONS.trendDn} size={13} /> Decreased
-              </div>
-              {movers.decreasing.length === 0 ? (
-                <p className="text-xs text-slate-400">None above threshold</p>
-              ) : (
-                <ul className="space-y-1.5">
-                  {movers.decreasing.map(m => (
-                    <li key={m.name} className="flex items-center justify-between gap-2 text-sm">
-                      <span className="truncate text-slate-700">{m.name}</span>
-                      <span className="flex-shrink-0 text-emerald-600 font-medium tabular-nums">
-                        {formatMoney(m.delta, currency)}
-                      </span>
-                    </li>
-                  ))}
-                </ul>
-              )}
+              <div className="text-xs font-semibold text-emerald-600 mb-2">▼ Decreased</div>
+              {decreasing.length === 0
+                ? <p className="text-xs text-slate-400">None above $0.50</p>
+                : decreasing.map(m => (
+                  <div key={m.name} className="flex items-center justify-between py-1 text-sm">
+                    <span className="truncate text-slate-700 mr-2">{m.name}</span>
+                    <span className="flex-shrink-0 text-emerald-600 font-semibold">{fmt(m.delta, currency)}</span>
+                  </div>
+                ))
+              }
             </div>
           </div>
         </Card>
       );
     }
 
-    function DetailTable({ records, currency, totalCost }) {
-      const [search, setSearch] = useState("");
+    function DetailTable({ records, currency, total }) {
+      const [q, setQ] = useState("");
       const rows = useMemo(() => {
-        // Group by resource
-        const map = new Map();
+        const map = {};
         for (const r of records) {
-          const k = r.resourceName + "|" + r.resourceGroup;
-          if (!map.has(k)) map.set(k, { name: r.resourceName, rg: r.resourceGroup, service: r.service, cost: 0 });
-          map.get(k).cost += r.cost;
+          const k = `${r.resourceName}||${r.resourceGroup}`;
+          if (!map[k]) map[k] = { name: r.resourceName, rg: r.resourceGroup, service: r.service, cost: 0 };
+          map[k].cost += r.cost;
         }
-        let arr = [...map.values()].sort((a, b) => b.cost - a.cost);
-        if (search) {
-          const s = search.toLowerCase();
+        let arr = Object.values(map).sort((a, b) => b.cost - a.cost);
+        if (q) {
+          const lq = q.toLowerCase();
           arr = arr.filter(r =>
-            r.name.toLowerCase().includes(s) ||
-            r.rg.toLowerCase().includes(s) ||
-            r.service.toLowerCase().includes(s)
+            r.name.toLowerCase().includes(lq) ||
+            r.rg.toLowerCase().includes(lq) ||
+            r.service.toLowerCase().includes(lq)
           );
         }
         return arr;
-      }, [records, search]);
+      }, [records, q]);
 
       return (
         <Card>
-          <div className="p-4 sm:p-5 border-b border-slate-100 flex flex-wrap items-center justify-between gap-2">
-            <h3 className="text-sm font-semibold text-slate-700">All resources</h3>
-            <input
-              type="text" placeholder="Search…" value={search}
-              onChange={e => setSearch(e.target.value)}
-              className="text-sm border border-slate-200 rounded-md px-3 py-1.5 w-full sm:w-48 focus:outline-none focus:border-blue-400"
-            />
+          <div className="px-4 py-3 border-b border-slate-100 flex flex-wrap items-center justify-between gap-2">
+            <div className="text-sm font-semibold text-slate-700">All resources</div>
+            <input type="text" placeholder="Search…" value={q} onChange={e => setQ(e.target.value)}
+              className="text-sm border border-slate-200 rounded-md px-3 py-1.5 w-full sm:w-44 focus:outline-none focus:border-blue-400" />
           </div>
           <div className="overflow-x-auto">
             <table className="w-full text-sm">
-              <thead className="bg-slate-50 text-slate-500 text-xs uppercase tracking-wide">
+              <thead className="bg-slate-50 text-xs text-slate-500 uppercase tracking-wide">
                 <tr>
                   <th className="px-4 py-2 text-left font-medium">Resource</th>
                   <th className="px-4 py-2 text-left font-medium hidden sm:table-cell">Service</th>
-                  <th className="px-4 py-2 text-left font-medium hidden md:table-cell">Resource group</th>
                   <th className="px-4 py-2 text-right font-medium">Cost</th>
                   <th className="px-4 py-2 text-right font-medium hidden sm:table-cell">% of total</th>
                 </tr>
               </thead>
               <tbody className="divide-y divide-slate-100">
                 {rows.length === 0 && (
-                  <tr><td colSpan={5} className="px-4 py-8 text-center text-slate-400">No matching records</td></tr>
+                  <tr><td colSpan={4} className="px-4 py-8 text-center text-slate-400 text-sm">No results</td></tr>
                 )}
                 {rows.slice(0, 100).map((r, i) => (
                   <tr key={i} className="hover:bg-slate-50">
-                    <td className="px-4 py-2.5 text-slate-900 font-medium truncate max-w-[180px]">{r.name}</td>
+                    <td className="px-4 py-2.5 font-medium text-slate-900 max-w-[160px] truncate">{r.name}</td>
                     <td className="px-4 py-2.5 text-slate-500 hidden sm:table-cell">{r.service}</td>
-                    <td className="px-4 py-2.5 text-slate-500 hidden md:table-cell">{r.rg}</td>
-                    <td className="px-4 py-2.5 text-right text-slate-900 tabular-nums">{formatMoney(r.cost, currency)}</td>
-                    <td className="px-4 py-2.5 text-right text-slate-500 tabular-nums hidden sm:table-cell">
-                      {totalCost > 0 ? ((r.cost / totalCost) * 100).toFixed(1) + "%" : "—"}
+                    <td className="px-4 py-2.5 text-right tabular-nums text-slate-900">{fmt(r.cost, currency)}</td>
+                    <td className="px-4 py-2.5 text-right text-slate-400 tabular-nums hidden sm:table-cell">
+                      {total > 0 ? ((r.cost / total) * 100).toFixed(1) + "%" : "—"}
                     </td>
                   </tr>
                 ))}
               </tbody>
             </table>
             {rows.length > 100 && (
-              <p className="px-4 py-2.5 text-xs text-slate-400 text-center bg-slate-50">
-                Showing top 100 of {rows.length} results
+              <p className="px-4 py-2.5 text-center text-xs text-slate-400 bg-slate-50">
+                Showing top 100 of {rows.length}
               </p>
             )}
           </div>
@@ -771,97 +726,87 @@
     // =========================================================================
     // Main Dashboard
     // =========================================================================
-    function Dashboard({ selected, allSubs, onChangeSubs, onSignOut, setToken }) {
-      const [days, setDays]               = useState(30);
-      const [data, setData]               = useState(null);
-      const [loading, setLoading]         = useState(true);
-      const [progressMsg, setProgressMsg] = useState("");
-      const [error, setError]             = useState(null);
+    function Dashboard({ selected, allSubs, onChangeSubs, onSignOut }) {
+      const [days, setDays]   = useState(30);
+      const [data, setData]   = useState(null);
+      const [loading, setLoading] = useState(true);
+      const [progress, setProgress] = useState("");
+      const [error, setError] = useState(null);
 
       const load = useCallback(async (force = false) => {
         setError(null);
         setLoading(true);
-        setProgressMsg("Loading…");
+        setProgress("Loading…");
         try {
-          const at = await ensureValidToken(setToken);
-          const result = await getCostData(selected, allSubs, days, at, {
-            force,
-            onProgress: msg => setProgressMsg(msg)
-          });
+          const result = await getCostData(selected, allSubs, days, msg => setProgress(msg), force);
           setData(result);
         } catch (e) {
           setError(e.message);
         } finally {
           setLoading(false);
-          setProgressMsg("");
+          setProgress("");
         }
-      }, [selected, allSubs, days, setToken]);
+      }, [selected, allSubs, days]);
 
       useEffect(() => { load(false); }, [load]);
 
       const stats = useMemo(() => data ? calcStats(data.records, days) : null, [data, days]);
       const ts    = useMemo(() => data ? buildTimeSeries(data.records, data.from, data.to) : [], [data]);
-
-      const cacheAge = data ? Math.floor((Date.now() - data.fetchedAt) / 60000) : 0;
+      const cacheAge = data ? Math.round((Date.now() - data.fetchedAt) / 60000) : 0;
 
       return (
         <div className="min-h-screen bg-slate-50">
           {/* Top bar */}
-          <div className="bg-white border-b border-slate-200 sticky top-0 z-10">
-            <div className="max-w-6xl mx-auto px-4 sm:px-6 py-3 flex items-center justify-between gap-2">
-              <div className="flex items-center gap-2 min-w-0">
-                <Icon d={ICONS.cloud} size={20} className="text-blue-600 flex-shrink-0" />
-                <span className="font-semibold text-slate-900 text-sm truncate">Azure Cost Dashboard</span>
+          <div className="bg-white border-b border-slate-200 sticky top-0 z-10 shadow-sm">
+            <div className="max-w-5xl mx-auto px-4 py-3 flex items-center justify-between">
+              <div className="flex items-center gap-2">
+                <svg width="20" height="20" fill="none" stroke="#2563eb" strokeWidth="2" viewBox="0 0 24 24">
+                  <path d="M18 10h-1.26A8 8 0 1 0 9 20h9a5 5 0 0 0 0-10z"/>
+                </svg>
+                <span className="font-semibold text-slate-900 text-sm">Azure Cost</span>
               </div>
-              <div className="flex items-center gap-1 sm:gap-2">
-                <Btn variant="secondary" size="sm" onClick={onChangeSubs}>
-                  <Icon d={ICONS.filter} size={13} />
-                  <span className="hidden sm:inline">Subscriptions</span>
-                </Btn>
-                <Btn variant="ghost" size="sm" onClick={onSignOut}>
-                  <Icon d={ICONS.logout} size={13} />
-                  <span className="hidden sm:inline">Sign out</span>
-                </Btn>
+              <div className="flex items-center gap-2">
+                <Btn variant="secondary" onClick={onChangeSubs} small>Subscriptions</Btn>
+                <Btn variant="ghost" onClick={onSignOut} small>Sign out</Btn>
               </div>
             </div>
           </div>
 
-          <div className="max-w-6xl mx-auto px-4 sm:px-6 py-6 space-y-5">
-            {/* Controls row */}
-            <div className="flex flex-wrap items-center justify-between gap-3">
+          <div className="max-w-5xl mx-auto px-4 py-5 space-y-4">
+            {/* Controls */}
+            <div className="flex flex-wrap items-center justify-between gap-2">
               <div className="flex gap-1 bg-white border border-slate-200 rounded-lg p-1 shadow-sm">
                 {[7, 30, 90].map(n => (
                   <button key={n} onClick={() => setDays(n)}
-                    className={cx(
-                      "px-3 py-1.5 text-xs font-medium rounded-md transition-colors",
-                      days === n ? "bg-slate-900 text-white" : "text-slate-600 hover:bg-slate-100"
-                    )}>
+                    className={cx("px-3 py-1.5 text-xs font-semibold rounded-md transition-colors",
+                      days === n ? "bg-slate-900 text-white" : "text-slate-500 hover:bg-slate-100")}>
                     {n}d
                   </button>
                 ))}
               </div>
               <div className="flex items-center gap-2">
                 {data && (
-                  <span className="text-xs text-slate-400 hidden sm:block">
-                    {data.fromCache ? `Cached ${cacheAge}m ago` : "Just now"} · {data.records.length.toLocaleString()} records
+                  <span className="text-xs text-slate-400">
+                    {data.fromCache ? `Cached ${cacheAge}m ago` : "Fresh"} · {data.records.length.toLocaleString()} records
                   </span>
                 )}
-                <Btn variant="secondary" size="sm" onClick={() => load(true)} disabled={loading}>
-                  <Icon d={ICONS.refresh} size={13} className={loading ? "spin" : ""} />
-                  Refresh
+                <Btn variant="secondary" onClick={() => load(true)} disabled={loading} small>
+                  {loading ? <Spinner size={12} /> : "↻"} Refresh
                 </Btn>
               </div>
             </div>
 
-            <ErrBox msg={error} />
+            <ErrMsg msg={error} />
 
             {/* Loading state */}
-            {loading && !data && (
-              <Card className="p-10 flex flex-col items-center gap-3">
-                <Spinner size={28} className="text-blue-400" />
-                <div className="text-sm text-slate-500 text-center">{progressMsg || "Fetching cost data…"}</div>
-                <div className="text-xs text-slate-400 text-center max-w-md">
-                  First load can take 10–30 seconds for PAYG subscriptions while we paginate through the usage details API.
+            {loading && (
+              <Card className="p-10">
+                <div className="flex flex-col items-center gap-3">
+                  <Spinner size={32} className="text-blue-400" />
+                  <div className="text-sm text-slate-600 font-medium">{progress}</div>
+                  <div className="text-xs text-slate-400 text-center max-w-xs">
+                    First load may take 15–30 seconds — the PAYG usage API paginates records in batches of 1,000.
+                  </div>
                 </div>
               </Card>
             )}
@@ -869,39 +814,31 @@
             {/* Empty state */}
             {!loading && data && data.records.length === 0 && (
               <Card className="p-8 text-center">
-                <Icon d={ICONS.info} size={32} className="text-slate-300 mx-auto mb-2" />
+                <div className="text-3xl mb-2">🔍</div>
                 <h3 className="font-semibold text-slate-700">No cost data found</h3>
                 <p className="text-sm text-slate-500 mt-1">
-                  No usage records were found in the last {days} days for the selected subscription{selected.size > 1 ? "s" : ""}.
-                  Try a wider time range, or check that your subscription has activity.
+                  No usage records in the last {days} days. Try a wider time range or check your subscription has activity.
                 </p>
               </Card>
             )}
 
-            {/* Data */}
-            {data && data.records.length > 0 && stats && (
+            {/* Dashboard content */}
+            {!loading && data && data.records.length > 0 && stats && (
               <>
-                {/* KPI grid */}
                 <div className="grid grid-cols-2 lg:grid-cols-4 gap-3">
-                  <KpiCard label={`Total (${days}d)`}
-                           value={formatMoney(stats.total, data.currency)}
-                           sub={`${data.from} → ${data.to}`} />
-                  <KpiCard label="Daily average"
-                           value={formatMoney(stats.avgDaily, data.currency)} />
-                  <KpiCard label="Highest day"
-                           value={formatMoney(stats.peakDay.cost, data.currency)}
-                           sub={stats.peakDay.date} />
+                  <KpiCard label={`Total (${days}d)`} value={fmt(stats.total, data.currency)} sub={`${data.from} to ${data.to}`} />
+                  <KpiCard label="Daily avg" value={fmt(stats.avgDaily, data.currency)} />
+                  <KpiCard label="Peak day" value={fmt(stats.peakDay.cost, data.currency)} sub={stats.peakDay.date} />
                   <KpiCard label="Trend"
-                           value={stats.trendPct != null ? `${stats.trendPct > 0 ? "+" : ""}${stats.trendPct.toFixed(1)}%` : "—"}
-                           sub={`${formatMoney(stats.recentHalf, data.currency)} vs ${formatMoney(stats.earlierHalf, data.currency)}`}
-                           trend={stats.trendPct}
-                           trendPct={stats.trendPct} />
+                    value={stats.trendPct != null ? `${stats.trendPct > 0 ? "+" : ""}${stats.trendPct.toFixed(1)}%` : "N/A"}
+                    sub={`${fmt(stats.recent, data.currency)} vs ${fmt(stats.earlier, data.currency)}`}
+                    trend={stats.trendPct} />
                 </div>
 
                 <TimeSeriesChart data={ts} currency={data.currency} />
-                <GroupingChart records={data.records} currency={data.currency} total={stats.total} />
-                <MoversList records={data.records} days={days} currency={data.currency} />
-                <DetailTable records={data.records} currency={data.currency} totalCost={stats.total} />
+                <GroupChart records={data.records} currency={data.currency} />
+                <MoversCard records={data.records} days={days} currency={data.currency} />
+                <DetailTable records={data.records} currency={data.currency} total={stats.total} />
               </>
             )}
           </div>
@@ -913,19 +850,17 @@
     // Root App
     // =========================================================================
     function App() {
-      const [phase, setPhase]           = useState("init");
-      const [token, setToken]           = useState(null);
-      const [subs, setSubs]             = useState([]);
-      const [selected, setSelected]     = useState(new Set());
-      const [busy, setBusy]             = useState(false);
-      const [error, setError]           = useState(null);
+      const [phase, setPhase]         = useState("init");
+      const [subs, setSubs]           = useState([]);
+      const [selected, setSelected]   = useState(new Set());
+      const [busy, setBusy]           = useState(false);
+      const [error, setError]         = useState(null);
       const [subsLoading, setSubsLoading] = useState(false);
 
-      // Handle redirect back from Microsoft
       useEffect(() => {
         const params = new URLSearchParams(window.location.search);
-        const code   = params.get("code");
-        const err    = params.get("error");
+        const code = params.get("code");
+        const err  = params.get("error");
 
         if (err) {
           window.history.replaceState({}, "", window.location.pathname);
@@ -939,121 +874,94 @@
           const verifier = sessionStorage.getItem("pkce_verifier");
           sessionStorage.removeItem("pkce_verifier");
           if (!verifier) {
-            setError("PKCE verifier missing — please try signing in again.");
+            setError("Missing PKCE verifier — please try signing in again.");
             setPhase("signin");
             return;
           }
           setBusy(true);
           exchangeCode(code, verifier)
             .then(async resp => {
-              const t = makeToken(resp, null);
-              kv.set("auth:token", t);
-              setToken(t);
-              await loadSubsAndAdvance(t);
+              kv.set("auth:token", makeToken(resp, null));
+              await hydrate();
             })
             .catch(e => { setError(e.message); setPhase("signin"); })
             .finally(() => setBusy(false));
           return;
         }
-        hydrateFromStorage();
+
+        hydrate();
       }, []);
 
-      async function hydrateFromStorage() {
+      async function hydrate() {
         try {
           const raw = kv.get("auth:token");
-          if (raw) {
-            const t = JSON.parse(raw);
-            if (t.expires_at > Date.now() + 60_000) {
-              setToken(t);
-              await loadSubsAndAdvance(t);
-              return;
-            } else if (t.refresh_token) {
-              try {
-                const fresh = await doRefresh(t.refresh_token);
-                const nt = makeToken(fresh, t.refresh_token);
-                kv.set("auth:token", nt);
-                setToken(nt);
-                await loadSubsAndAdvance(nt);
-                return;
-              } catch {}
-            }
+          if (!raw) { setPhase("signin"); return; }
+          let t = JSON.parse(raw);
+          if (t.expires_at <= Date.now() + 60_000) {
+            if (!t.refresh_token) { setPhase("signin"); return; }
+            const fresh = await doRefresh(t.refresh_token);
+            t = makeToken(fresh, t.refresh_token);
+            kv.set("auth:token", t);
           }
-        } catch {}
-        setPhase("signin");
-      }
-
-      async function loadSubsAndAdvance(t) {
-        setSubsLoading(true);
-        const selRaw = kv.get("subs:selected");
-        if (selRaw) {
-          try { setSelected(new Set(JSON.parse(selRaw))); } catch {}
-        }
-        // If we already have a saved selection, jump straight to dashboard
-        const savedSel = selRaw ? new Set(JSON.parse(selRaw)) : new Set();
-        try {
+          setSubsLoading(true);
           const list = await listSubs(t.access_token);
           setSubs(list);
-          // Validate saved selection still exists
-          const valid = new Set([...savedSel].filter(id => list.some(s => s.id === id)));
-          if (valid.size > 0) {
-            setSelected(valid);
-            setPhase("dashboard");
-          } else {
-            setPhase("subs");
+          const selRaw = kv.get("subs:selected");
+          if (selRaw) {
+            const ids = JSON.parse(selRaw);
+            const valid = new Set(ids.filter(id => list.some(s => s.id === id)));
+            if (valid.size > 0) {
+              setSelected(valid);
+              setPhase("dashboard");
+              return;
+            }
           }
-        } catch (e) {
-          setError(e.message);
           setPhase("subs");
+        } catch (e) {
+          console.error(e);
+          setPhase("signin");
         } finally {
           setSubsLoading(false);
         }
       }
 
       const signIn = useCallback(async () => {
-        setError(null);
-        setBusy(true);
+        setError(null); setBusy(true);
         try {
           const { verifier, challenge } = await makePkce();
           const state = b64url(randBytes(16).buffer);
           sessionStorage.setItem("pkce_verifier", verifier);
-          sessionStorage.setItem("pkce_state",    state);
+          sessionStorage.setItem("pkce_state", state);
           window.location.href = buildAuthUrl(challenge, state);
-        } catch (e) {
-          setError(e.message);
-          setBusy(false);
-        }
+        } catch (e) { setError(e.message); setBusy(false); }
       }, []);
 
       const signOut = useCallback(() => {
-        kv.del("auth:token");
-        kv.del("subs:selected");
-        // Clear cost caches too
+        kv.del("auth:token"); kv.del("subs:selected");
         try {
           for (let i = localStorage.length - 1; i >= 0; i--) {
             const k = localStorage.key(i);
             if (k && k.startsWith("cost:")) localStorage.removeItem(k);
           }
         } catch {}
-        setToken(null); setSubs([]); setSelected(new Set()); setError(null);
+        setSubs([]); setSelected(new Set()); setError(null);
         setPhase("signin");
       }, []);
 
       const toggleSub = id => setSelected(p => {
         const n = new Set(p); n.has(id) ? n.delete(id) : n.add(id); return n;
       });
-
-      const selectAll = () =>
-        setSelected(selected.size === subs.length ? new Set() : new Set(subs.map(s => s.id)));
-
+      const selectAll = () => setSelected(
+        selected.size === subs.length ? new Set() : new Set(subs.map(s => s.id))
+      );
       const goToDashboard = () => {
         kv.set("subs:selected", JSON.stringify([...selected]));
         setPhase("dashboard");
       };
 
-      // Render
-      if (phase === "init" || (phase === "signin" && busy)) return (
+      if (phase === "init" || busy) return (
         <div className="min-h-screen bg-slate-50 flex flex-col items-center justify-center gap-3">
-          <Spinner size={28} className="text-blue-400" />
+          <Spinner size={32} className="text-blue-400" />
           <p className="text-sm text-slate-400">{busy ? "Completing sign-in…" : "Loading…"}</p>
         </div>
       );
@@ -1061,21 +969,14 @@
       if (phase === "signin") return <SignInScreen onSignIn={signIn} busy={busy} error={error} />;
 
       if (phase === "subs") return (
-        <SubPicker
-          subs={subs} selected={selected}
-          onToggle={toggleSub} onSelectAll={selectAll}
-          onContinue={goToDashboard} onSignOut={signOut}
-          loading={subsLoading}
-        />
+        <SubPicker subs={subs} selected={selected} onToggle={toggleSub}
+          onSelectAll={selectAll} onContinue={goToDashboard}
+          onSignOut={signOut} loading={subsLoading} />
       );
 
       if (phase === "dashboard") return (
-        <Dashboard
-          selected={selected} allSubs={subs}
-          onChangeSubs={() => setPhase("subs")}
-          onSignOut={signOut}
-          setToken={setToken}
-        />
+        <Dashboard selected={selected} allSubs={subs}
+          onChangeSubs={() => setPhase("subs")} onSignOut={signOut} />
       );
 
       return null;
