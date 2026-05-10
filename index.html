@@ -1535,151 +1535,478 @@
     };
 
     // Pass 1 debug view — replaced by full InsightCards in Pass 2
-    function AlertsSummaryDebug({ alerts, currency, dark }) {
-      const [expanded, setExpanded] = useState(false);
-      const critical = alerts.filter(a => a.tier === "critical");
-      const warning  = alerts.filter(a => a.tier === "warning");
-      const watch    = alerts.filter(a => a.tier === "watch");
+    // =========================================================================
+    // INSIGHT CARDS (Pass 2)
+    // =========================================================================
 
-      const borderColor = dark ? "border-gray-700" : "border-slate-200";
-      const bgColor     = dark ? "bg-gray-800"     : "bg-white";
-      const textMain    = dark ? "text-gray-100"   : "text-slate-900";
-      const textMuted   = dark ? "text-gray-400"   : "text-slate-500";
+    const TIER_CONFIG = {
+      critical: { label: "Critical", icon: "🔴",
+        light: "bg-red-50 border-red-200",     dark_: "bg-red-950 border-red-900",
+        badge: "bg-red-600 text-white",         text: "text-red-700",  darkText: "text-red-300" },
+      warning:  { label: "Warning",  icon: "🟠",
+        light: "bg-amber-50 border-amber-200",  dark_: "bg-amber-950 border-amber-900",
+        badge: "bg-amber-500 text-white",       text: "text-amber-700", darkText: "text-amber-300" },
+      watch:    { label: "Watch",    icon: "🔵",
+        light: "bg-blue-50 border-blue-200",    dark_: "bg-blue-950 border-blue-900",
+        badge: "bg-blue-500 text-white",        text: "text-blue-700",  darkText: "text-blue-300" },
+    };
+
+    const CONFIDENCE_CONFIG = {
+      high:   { label: "High confidence",   dot: "bg-emerald-500" },
+      medium: { label: "Med confidence",    dot: "bg-amber-500"   },
+      low:    { label: "Low confidence",    dot: "bg-slate-400"   },
+    };
+
+    const TRIGGER_LABELS = {
+      threshold_absolute:  "Threshold breach",
+      threshold_pct:       "% threshold breach",
+      unusual_jump:        "Unusual cost jump",
+      growth_acceleration: "Accelerating growth",
+      new_top_driver:      "New top cost driver",
+      forecast_breach:     "Forecast breach",
+      idle_vm:             "Idle VM detected",
+    };
+
+    function InsightCard({ alert, dark }) {
+      const [expanded, setExpanded] = useState(false);
+      const tc = TIER_CONFIG[alert.tier] || TIER_CONFIG.watch;
+      const cc = CONFIDENCE_CONFIG[alert.confidenceTier] || CONFIDENCE_CONFIG.medium;
+      const cardBg   = dark ? tc.dark_ : tc.light;
+      const textMain = dark ? "text-gray-100" : "text-slate-900";
+      const textMid  = dark ? "text-gray-300" : "text-slate-700";
+      const textMuted= dark ? "text-gray-500" : "text-slate-500";
 
       return (
-        <div className={cx("rounded-xl border shadow-sm overflow-hidden", bgColor, borderColor)}>
-          {/* Header */}
-          <button onClick={() => setExpanded(v => !v)}
-            className={cx("w-full flex items-center justify-between px-4 py-3 text-left transition-colors",
-              dark ? "hover:bg-gray-700" : "hover:bg-slate-50")}>
-            <div className="flex items-center gap-2">
-              <span className={cx("text-sm font-semibold", textMain)}>
-                Intelligence — {alerts.length} alert{alerts.length !== 1 ? "s" : ""}
+        <div className={cx("rounded-xl border p-4 space-y-2", cardBg)}>
+          {/* Row 1: badge + resource + confidence */}
+          <div className="flex flex-wrap items-center gap-2">
+            <span className={cx("text-xs px-2 py-0.5 rounded-full font-bold", tc.badge)}>
+              {tc.label}
+            </span>
+            <span className={cx("text-sm font-bold", textMain)}>{alert.resourceName}</span>
+            {alert.hasOverride && (
+              <span className="text-xs px-1.5 py-0.5 rounded bg-blue-100 text-blue-700 font-medium">
+                custom threshold
               </span>
-              {/* Tier badge pills */}
-              <div className="flex gap-1">
-                {critical.length > 0 && (
-                  <span className="text-xs px-1.5 py-0.5 rounded-full bg-red-100 text-red-700 font-semibold">
-                    {critical.length} critical
-                  </span>
-                )}
-                {warning.length > 0 && (
-                  <span className="text-xs px-1.5 py-0.5 rounded-full bg-amber-100 text-amber-700 font-semibold">
-                    {warning.length} warning
-                  </span>
-                )}
-                {watch.length > 0 && (
-                  <span className="text-xs px-1.5 py-0.5 rounded-full bg-blue-100 text-blue-700 font-semibold">
-                    {watch.length} watch
-                  </span>
-                )}
-              </div>
-              <span className={cx("text-xs", textMuted)}>(Pass 1 debug view)</span>
+            )}
+            {alert.isNew && (
+              <span className="text-xs px-1.5 py-0.5 rounded bg-amber-100 text-amber-700 font-medium">
+                new resource
+              </span>
+            )}
+            <div className="flex items-center gap-1 ml-auto flex-shrink-0">
+              <span className={cx("w-2 h-2 rounded-full flex-shrink-0", cc.dot)} />
+              <span className={cx("text-xs font-medium", textMuted)}>{cc.label}</span>
             </div>
-            <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.5"
-              strokeLinecap="round" className={cx("transition-transform flex-shrink-0", textMuted, expanded ? "" : "-rotate-90")}>
-              <path d="M6 9l6 6 6-6"/>
-            </svg>
-          </button>
+          </div>
 
-          {expanded && (
-            <div className={cx("border-t divide-y", borderColor, dark ? "divide-gray-700" : "divide-slate-100")}>
-              {alerts.map((a, i) => {
-                const tc = TIER_CONFIG[a.tier] || TIER_CONFIG.watch;
-                const cc = CONFIDENCE_CONFIG[a.confidenceTier] || CONFIDENCE_CONFIG.medium;
-                return (
-                  <div key={i} className={cx("p-4", dark ? "hover:bg-gray-700" : "hover:bg-slate-50")}>
-                    {/* Row 1: tier badge + resource name + confidence */}
-                    <div className="flex flex-wrap items-center gap-2 mb-1.5">
-                      <span className={cx("text-xs px-2 py-0.5 rounded-full font-semibold border",
-                        dark ? `${tc.dark_bg} ${tc.dark_text} ${tc.dark_border}` : `${tc.bg} ${tc.text} ${tc.border}`)}>
-                        {tc.label}
-                      </span>
-                      <span className={cx("text-sm font-semibold", textMain)}>{a.resourceName}</span>
-                      <span className={cx("text-xs font-medium ml-auto", dark ? cc.darkColor : cc.color)}>
-                        {cc.label} confidence ({a.confidence})
-                      </span>
-                    </div>
-                    {/* Row 2: service + rg */}
-                    <div className={cx("text-xs mb-2", textMuted)}>
-                      {a.service} · {a.rg} · {a.location}
-                      {a.hasOverride && <span className="ml-2 text-blue-500">⬤ override</span>}
-                      {a.isNew && <span className="ml-2 text-amber-500">★ new resource</span>}
-                    </div>
-                    {/* Row 3: reason */}
-                    <div className={cx("text-sm mb-2", dark ? "text-gray-200" : "text-slate-700")}>
-                      {a.reason}
-                    </div>
-                    {/* Row 4: impact + action */}
-                    <div className="flex flex-wrap gap-x-4 gap-y-1 text-xs">
-                      <span className={textMuted}>
-                        Impact: <span className={cx("font-medium", dark ? "text-gray-200" : "text-slate-800")}>
-                          ~{fmt(a.impact, a.currency)}/month
-                        </span>
-                      </span>
-                      <span className={textMuted}>
-                        Action: <span className={cx("font-medium", dark ? "text-gray-200" : "text-slate-700")}>
-                          {a.suggestedAction}
-                        </span>
-                      </span>
-                    </div>
-                    {/* Row 5: all trigger types (debug) */}
-                    <div className={cx("mt-2 text-xs", textMuted)}>
-                      Triggers: {a.triggers.map(t => t.type).join(", ")}
-                    </div>
-                  </div>
-                );
-              })}
+          {/* Row 2: service + rg */}
+          <div className={cx("text-xs", textMuted)}>
+            {alert.service} · {alert.rg}
+            {alert.location && alert.location !== "—" ? ` · ${alert.location}` : ""}
+          </div>
+
+          {/* Row 3: reason */}
+          <div className={cx("text-sm leading-snug", textMid)}>{alert.reason}</div>
+
+          {/* Row 4: impact + action */}
+          <div className="grid grid-cols-2 gap-2 text-xs">
+            <div className={cx("rounded-lg p-2", dark ? "bg-black/20" : "bg-white/60")}>
+              <div className={cx("font-medium mb-0.5", textMuted)}>Est. impact</div>
+              <div className={cx("font-bold", textMain)}>{fmt(alert.impact, alert.currency)}/mo</div>
+            </div>
+            <div className={cx("rounded-lg p-2", dark ? "bg-black/20" : "bg-white/60")}>
+              <div className={cx("font-medium mb-0.5", textMuted)}>Suggestion</div>
+              <div className={cx("leading-tight", textMid)}>{alert.suggestedAction}</div>
+            </div>
+          </div>
+
+          {/* Row 5: triggers (expandable) */}
+          {alert.triggers.length > 1 && (
+            <button onClick={() => setExpanded(v => !v)}
+              className={cx("text-xs flex items-center gap-1 transition-colors", textMuted, dark ? "hover:text-gray-300" : "hover:text-slate-700")}>
+              <span>{expanded ? "▲" : "▼"}</span>
+              {alert.triggers.length} signals
+            </button>
+          )}
+          {(expanded || alert.triggers.length === 1) && (
+            <div className="space-y-1">
+              {alert.triggers.map((t, i) => (
+                <div key={i} className={cx("text-xs flex items-start gap-1.5", textMuted)}>
+                  <span className="flex-shrink-0 mt-0.5">·</span>
+                  <span><span className="font-medium">{TRIGGER_LABELS[t.type] || t.type}:</span> {t.detail}</span>
+                </div>
+              ))}
             </div>
           )}
         </div>
       );
     }
 
+    function InsightCards({ alerts, dark }) {
+      const [watchOpen, setWatchOpen] = useState(false);
+      const critical = alerts.filter(a => a.tier === "critical");
+      const warning  = alerts.filter(a => a.tier === "warning");
+      const watch    = alerts.filter(a => a.tier === "watch");
+      if (alerts.length === 0) return null;
+      const hdr = dark ? "text-gray-100" : "text-slate-900";
+      const muted = dark ? "text-gray-500" : "text-slate-500";
+      const divider = dark ? "border-gray-700" : "border-slate-200";
+
+      return (
+        <div className={cx("rounded-xl border shadow-sm overflow-hidden", dark ? "bg-gray-800 border-gray-700" : "bg-white border-slate-200")}>
+          <div className={cx("px-4 py-3 flex items-center gap-2 border-b", divider)}>
+            <span className={cx("text-sm font-semibold", hdr)}>Insights</span>
+            <div className="flex gap-1.5">
+              {critical.length > 0 && <span className="text-xs px-2 py-0.5 rounded-full bg-red-600 text-white font-bold">{critical.length} critical</span>}
+              {warning.length  > 0 && <span className="text-xs px-2 py-0.5 rounded-full bg-amber-500 text-white font-bold">{warning.length} warning</span>}
+              {watch.length    > 0 && <span className="text-xs px-2 py-0.5 rounded-full bg-blue-500 text-white font-bold">{watch.length} watch</span>}
+            </div>
+          </div>
+
+          <div className="p-3 space-y-3">
+            {/* Critical + Warning always visible */}
+            {[...critical, ...warning].map((a, i) => (
+              <InsightCard key={i} alert={a} dark={dark} />
+            ))}
+
+            {/* Watch: collapsed by default */}
+            {watch.length > 0 && (
+              <div>
+                <button onClick={() => setWatchOpen(v => !v)}
+                  className={cx("w-full flex items-center justify-between px-3 py-2 rounded-lg text-xs font-medium transition-colors",
+                    dark ? "bg-gray-700 hover:bg-gray-600 text-gray-300" : "bg-slate-100 hover:bg-slate-200 text-slate-600")}>
+                  <span>{watchOpen ? "▲" : "▼"} Watch alerts ({watch.length})</span>
+                  <span className={muted}>{watchOpen ? "Collapse" : "Show"}</span>
+                </button>
+                {watchOpen && (
+                  <div className="mt-2 space-y-2">
+                    {watch.map((a, i) => <InsightCard key={i} alert={a} dark={dark} />)}
+                  </div>
+                )}
+              </div>
+            )}
+          </div>
+        </div>
+      );
+    }
+
+    // =========================================================================
+    // ALERTS TAB (Pass 3)
+    // =========================================================================
+
+    const SCOPE_TYPES = [
+      { id: "service",  label: "Service" },
+      { id: "rg",       label: "Resource group" },
+      { id: "location", label: "Location" },
+      { id: "resource", label: "Resource" },
+    ];
+
+    function ThresholdFields({ values, onChange, currency }) {
+      const dark = useDark();
+      const lbl = cx("block text-xs font-medium mb-1", dark ? "text-gray-400" : "text-slate-500");
+      const inp = cx("w-full text-sm rounded-md px-3 py-1.5 border focus:outline-none",
+        dark ? "bg-gray-700 border-gray-600 text-gray-100 focus:border-blue-500"
+             : "bg-white border-slate-200 text-slate-900 focus:border-blue-400");
+      const sel = cx(inp, "cursor-pointer");
+
+      return (
+        <div className="grid grid-cols-2 gap-3 mt-3">
+          <div>
+            <label className={lbl}>Absolute limit / month ({currency})</label>
+            <input type="number" min="0" step="1" value={values.absoluteMonthly ?? ""}
+              onChange={e => onChange({ ...values, absoluteMonthly: parseFloat(e.target.value) || 0 })}
+              className={inp} placeholder="e.g. 50" />
+          </div>
+          <div>
+            <label className={lbl}>Alert tier (absolute)</label>
+            <select value={values.tierAbsolute || "warning"} onChange={e => onChange({ ...values, tierAbsolute: e.target.value })} className={sel}>
+              <option value="watch">Watch</option>
+              <option value="warning">Warning</option>
+              <option value="critical">Critical</option>
+            </select>
+          </div>
+          <div>
+            <label className={lbl}>Month-over-month increase (%)</label>
+            <input type="number" min="1" max="500" step="1" value={values.momPct ?? ""}
+              onChange={e => onChange({ ...values, momPct: parseFloat(e.target.value) || 0 })}
+              className={inp} placeholder="e.g. 25" />
+          </div>
+          <div>
+            <label className={lbl}>Alert tier (% change)</label>
+            <select value={values.tierPct || "watch"} onChange={e => onChange({ ...values, tierPct: e.target.value })} className={sel}>
+              <option value="watch">Watch</option>
+              <option value="warning">Warning</option>
+              <option value="critical">Critical</option>
+            </select>
+          </div>
+        </div>
+      );
+    }
+
+    function GlobalDefaultsSection({ currency, onSaved }) {
+      const dark = useDark();
+      const [values, setValues] = useState(() => ensureGlobalThreshold());
+      const [saved, setSaved] = useState(false);
+      const bg    = dark ? "bg-gray-800"  : "bg-white";
+      const hdr   = dark ? "text-gray-100": "text-slate-900";
+      const muted = dark ? "text-gray-400": "text-slate-500";
+      const divider = dark ? "border-gray-700" : "border-slate-100";
+
+      const save = () => {
+        kv.set("thresholds:global", values);
+        setSaved(true);
+        setTimeout(() => setSaved(false), 2000);
+        if (onSaved) onSaved();
+      };
+
+      return (
+        <div className={cx("rounded-xl border shadow-sm overflow-hidden", dark ? "border-gray-700" : "border-slate-200", bg)}>
+          <div className={cx("px-4 py-3 border-b flex items-center justify-between", divider)}>
+            <div>
+              <span className={cx("text-sm font-semibold", hdr)}>Global defaults</span>
+              <span className={cx("text-xs ml-2", muted)}>Applies to all resources unless overridden</span>
+            </div>
+          </div>
+          <div className="px-4 pb-4">
+            <ThresholdFields values={values} onChange={setValues} currency={currency} />
+            <div className="flex justify-end mt-3">
+              <button onClick={save}
+                className="text-sm px-4 py-2 rounded-lg bg-blue-600 text-white font-medium hover:bg-blue-700 transition-colors">
+                {saved ? "✓ Saved" : "Save defaults"}
+              </button>
+            </div>
+          </div>
+        </div>
+      );
+    }
+
+    function OverrideRow({ override, onEdit, onDelete, dark }) {
+      const [confirming, setConfirming] = useState(false);
+      const parts   = override.key.split(":");
+      const scope   = parts[1]; // service|rg|location|resource
+      const target  = parts.slice(2).join(":");
+      const scopeLabel = { service: "Service", rg: "Resource group", location: "Location", resource: "Resource" }[scope] || scope;
+      const bg    = dark ? "bg-gray-800 border-gray-700" : "bg-white border-slate-200";
+      const text  = dark ? "text-gray-100" : "text-slate-900";
+      const muted = dark ? "text-gray-400" : "text-slate-500";
+      const globals = ensureGlobalThreshold();
+
+      const diffs = [];
+      if (override.absoluteMonthly !== globals.absoluteMonthly)
+        diffs.push(`Absolute: ${override.absoluteMonthly}`);
+      if (override.momPct !== globals.momPct)
+        diffs.push(`MoM: ${override.momPct}%`);
+      if (override.tierAbsolute !== globals.tierAbsolute)
+        diffs.push(`Tier(abs): ${override.tierAbsolute}`);
+      if (override.tierPct !== globals.tierPct)
+        diffs.push(`Tier(%): ${override.tierPct}`);
+
+      return (
+        <div className={cx("flex items-center gap-3 px-4 py-3 border-b last:border-0", dark ? "border-gray-700" : "border-slate-100")}>
+          <div className="flex-1 min-w-0">
+            <div className="flex items-center gap-2">
+              <span className={cx("text-xs px-1.5 py-0.5 rounded font-medium", dark ? "bg-gray-700 text-gray-300" : "bg-slate-100 text-slate-600")}>
+                {scopeLabel}
+              </span>
+              <span className={cx("text-sm font-medium truncate", text)}>{target}</span>
+            </div>
+            {diffs.length > 0 && (
+              <div className={cx("text-xs mt-0.5", muted)}>{diffs.join(" · ")}</div>
+            )}
+          </div>
+          <div className="flex items-center gap-1 flex-shrink-0">
+            <button onClick={() => onEdit(override)}
+              className={cx("text-xs px-2 py-1 rounded border transition-colors",
+                dark ? "border-gray-600 text-gray-400 hover:bg-gray-700" : "border-slate-200 text-slate-600 hover:bg-slate-50")}>
+              Edit
+            </button>
+            {confirming
+              ? <button onClick={() => { onDelete(override.key); setConfirming(false); }}
+                  className="text-xs px-2 py-1 rounded bg-red-600 text-white font-medium">Confirm</button>
+              : <button onClick={() => setConfirming(true)}
+                  className={cx("text-xs px-2 py-1 rounded border transition-colors",
+                    dark ? "border-gray-600 text-red-400 hover:bg-gray-700" : "border-slate-200 text-red-600 hover:bg-red-50")}>
+                  Delete
+                </button>
+            }
+          </div>
+        </div>
+      );
+    }
+
+    function AddOverrideSection({ records, currency, onSaved, editingOverride, onCancelEdit }) {
+      const dark = useDark();
+      const [scopeType, setScopeType] = useState(editingOverride ? editingOverride.key.split(":")[1] : "service");
+      const [target, setTarget]       = useState(editingOverride ? editingOverride.key.split(":").slice(2).join(":") : "");
+      const [values, setValues]       = useState(() => editingOverride ? { ...editingOverride } : { ...THRESHOLD_DEFAULTS });
+      const [saved, setSaved]         = useState(false);
+      const [error, setError]         = useState("");
+
+      // Populate target options from records
+      const targetOptions = useMemo(() => {
+        if (!records) return [];
+        const sets = { service: new Set(), rg: new Set(), location: new Set(), resource: new Set() };
+        for (const r of records) {
+          sets.service.add(r.service);
+          sets.rg.add(r.resourceGroup);
+          sets.location.add(r.location);
+          sets.resource.add(r.resourceName);
+        }
+        return [...(sets[scopeType] || new Set())].filter(Boolean).sort();
+      }, [records, scopeType]);
+
+      const bg    = dark ? "bg-gray-800 border-gray-700" : "bg-white border-slate-200";
+      const hdr   = dark ? "text-gray-100" : "text-slate-900";
+      const muted = dark ? "text-gray-400" : "text-slate-500";
+      const sel   = cx("w-full text-sm rounded-md px-3 py-1.5 border focus:outline-none",
+        dark ? "bg-gray-700 border-gray-600 text-gray-100 focus:border-blue-500"
+             : "bg-white border-slate-200 text-slate-900 focus:border-blue-400");
+
+      const save = () => {
+        if (!target) { setError("Please select a target."); return; }
+        if (values.absoluteMonthly <= 0) { setError("Absolute limit must be > 0."); return; }
+        if (values.momPct < 1 || values.momPct > 500) { setError("MoM% must be 1–500."); return; }
+        const key = `thresholds:${scopeType}:${target}`;
+        kv.set(key, { ...values, enabled: true });
+        setSaved(true);
+        setTimeout(() => { setSaved(false); if (onSaved) onSaved(); }, 1200);
+        setError("");
+      };
+
+      const cancel = () => { if (onCancelEdit) onCancelEdit(); };
+
+      return (
+        <div className={cx("rounded-xl border shadow-sm overflow-hidden", bg)}>
+          <div className={cx("px-4 py-3 border-b flex items-center justify-between", dark ? "border-gray-700" : "border-slate-100")}>
+            <span className={cx("text-sm font-semibold", hdr)}>
+              {editingOverride ? "Edit override" : "Add override"}
+            </span>
+            {editingOverride && (
+              <button onClick={cancel} className={cx("text-xs", muted, "hover:underline")}>Cancel</button>
+            )}
+          </div>
+          <div className="px-4 pb-4 space-y-3">
+            {/* Scope type */}
+            <div className="mt-3">
+              <div className={cx("text-xs font-medium mb-1.5", muted)}>Scope type</div>
+              <div className={cx("flex gap-0.5 rounded-md p-0.5 border", dark ? "bg-gray-700 border-gray-600" : "bg-slate-100 border-slate-200")}>
+                {SCOPE_TYPES.map(s => (
+                  <button key={s.id} onClick={() => { setScopeType(s.id); setTarget(""); }}
+                    className={cx("flex-1 py-1 text-xs font-semibold rounded transition-colors",
+                      scopeType === s.id ? "bg-blue-600 text-white" : (dark ? "text-gray-400 hover:bg-gray-600" : "text-slate-600 hover:bg-white"))}>
+                    {s.label}
+                  </button>
+                ))}
+              </div>
+            </div>
+            {/* Target */}
+            <div>
+              <div className={cx("text-xs font-medium mb-1.5", muted)}>Target ({SCOPE_TYPES.find(s => s.id === scopeType)?.label})</div>
+              <select value={target} onChange={e => setTarget(e.target.value)} className={sel}>
+                <option value="">— Select —</option>
+                {targetOptions.map(o => <option key={o} value={o}>{o}</option>)}
+              </select>
+            </div>
+            {/* Threshold fields */}
+            <ThresholdFields values={values} onChange={setValues} currency={currency} />
+            {error && <div className="text-xs text-red-500">{error}</div>}
+            <div className="flex justify-end">
+              <button onClick={save}
+                className="text-sm px-4 py-2 rounded-lg bg-blue-600 text-white font-medium hover:bg-blue-700 transition-colors">
+                {saved ? "✓ Saved" : (editingOverride ? "Update override" : "Save override")}
+              </button>
+            </div>
+          </div>
+        </div>
+      );
+    }
+
+    function AlertsTab({ records, currency }) {
+      const dark = useDark();
+      const [overrides, setOverrides] = useState(() => listOverrides());
+      const [editing, setEditing]     = useState(null);
+      const bg    = dark ? "bg-gray-800 border-gray-700" : "bg-white border-slate-200";
+      const hdr   = dark ? "text-gray-100" : "text-slate-900";
+      const muted = dark ? "text-gray-400" : "text-slate-500";
+
+      const refresh = () => setOverrides(listOverrides());
+
+      const handleDelete = (key) => {
+        kv.del(key);
+        refresh();
+      };
+
+      return (
+        <div className="space-y-4">
+          {/* Section A: Global defaults */}
+          <GlobalDefaultsSection currency={currency} onSaved={refresh} />
+
+          {/* Section B: Active overrides */}
+          <div className={cx("rounded-xl border shadow-sm overflow-hidden", bg)}>
+            <div className={cx("px-4 py-3 border-b", dark ? "border-gray-700" : "border-slate-100")}>
+              <span className={cx("text-sm font-semibold", hdr)}>Active overrides</span>
+              {overrides.length > 0 && (
+                <span className={cx("text-xs ml-2", muted)}>{overrides.length} override{overrides.length !== 1 ? "s" : ""}</span>
+              )}
+            </div>
+            {overrides.length === 0
+              ? <div className={cx("px-4 py-6 text-sm text-center", muted)}>
+                  No overrides set. All resources use the global defaults above.
+                </div>
+              : <div>
+                  {overrides.map((o, i) => (
+                    <OverrideRow key={i} override={o} dark={dark}
+                      onEdit={ov => setEditing(ov)}
+                      onDelete={key => { handleDelete(key); setEditing(null); }} />
+                  ))}
+                </div>
+            }
+          </div>
+
+          {/* Section C: Add / edit override */}
+          <AddOverrideSection
+            records={records} currency={currency}
+            editingOverride={editing}
+            onCancelEdit={() => setEditing(null)}
+            onSaved={() => { refresh(); setEditing(null); }}
+          />
+        </div>
+      );
+    }
+
+    // =========================================================================
+    // DASHBOARD (Pass 2+3: tabs, insight cards, alerts tab)
+    // =========================================================================
     function Dashboard({ selected, allSubs, onChangeSubs, onSignOut }) {
-      const [days, setDays]     = useState(30);
-      const [data, setData]     = useState(null);
-      const [loading, setLoading] = useState(true);
+      const [days, setDays]         = useState(30);
+      const [data, setData]         = useState(null);
+      const [loading, setLoading]   = useState(true);
       const [progress, setProgress] = useState("");
-      const [error, setError]   = useState(null);
+      const [error, setError]       = useState(null);
       const [testMode, setTestMode] = useState(false);
-      const [dark, setDark] = useState(() => {
-        try { return localStorage.getItem("dark") === "1"; } catch { return false; }
-      });
+      const [dark, setDark]         = useState(() => { try { return localStorage.getItem("dark") === "1"; } catch { return false; } });
+      const [activeTab, setActiveTab] = useState("home");
 
-      // Shared grouping — controls time-series, bar chart AND movers
+      // Shared grouping
       const [groupId, setGroupId] = useState("service");
+      const [bucket, setBucket]   = useState(() => defaultBucket(30));
+      const [style, setStyle]     = useState("stacked");
 
-      // Time series controls
-      const [bucket, setBucket] = useState(() => defaultBucket(30));
-      const [style, setStyle]   = useState("stacked");
-
-      // When days changes reset to widest sensible bucket
       useEffect(() => { setBucket(defaultBucket(days)); }, [days]);
 
       const load = useCallback(async (force = false) => {
-        if (testMode) {
-          setData(generateTestData(days));
-          setLoading(false);
-          return;
-        }
-        setError(null);
-        setLoading(true);
-        setProgress("Loading…");
+        if (testMode) { setData(generateTestData(days)); setLoading(false); return; }
+        setError(null); setLoading(true); setProgress("Loading…");
         try {
           const result = await getCostData(selected, allSubs, days, msg => setProgress(msg), force);
           setData(result);
-        } catch (e) {
-          setError(e.message);
-        } finally {
-          setLoading(false);
-          setProgress("");
-        }
+        } catch (e) { setError(e.message); }
+        finally { setLoading(false); setProgress(""); }
       }, [selected, allSubs, days, testMode]);
 
       useEffect(() => { load(false); }, [load]);
 
-      // Toggle test mode — regenerate immediately
       const toggleTestMode = () => {
         const next = !testMode;
         setTestMode(next);
@@ -1687,53 +2014,51 @@
         else { setData(null); setLoading(true); }
       };
 
-      const stats   = useMemo(() => data ? calcStats(data.records, days) : null, [data, days]);
+      const stats    = useMemo(() => data ? calcStats(data.records, days) : null, [data, days]);
       const cacheAge = data ? Math.round((Date.now() - data.fetchedAt) / 60000) : 0;
       const groupOpt = GROUP_OPTS.find(o => o.id === groupId) || GROUP_OPTS[0];
 
-      // Run intelligence engine whenever data changes.
-      // metricsData comes from test data or real Monitor Metrics fetch (Pass 5).
       const alerts = useMemo(() => {
         if (!data || !data.records.length) return [];
         ensureGlobalThreshold();
         return runIntelligence(data.records, data.metrics || {}, days);
       }, [data, days]);
 
-      // Month-end forecast
-      const forecast = useMemo(() =>
-        data ? projectMonthEnd(data.records, data.currency) : null,
-      [data]);
+      const forecast = useMemo(() => data ? projectMonthEnd(data.records, data.currency) : null, [data]);
 
-      // Dark mode classes
-      const bg    = dark ? "bg-gray-900" : "bg-slate-50";
-      const hdrBg = dark ? "bg-gray-900 border-gray-700" : "bg-white border-slate-200";
-      const filBg = dark ? "bg-gray-800 border-gray-700" : "bg-slate-50 border-slate-100";
-      const segBg = dark ? "bg-gray-700 border-gray-600" : "bg-white border-slate-200";
-      const segAct = dark ? "bg-gray-500 text-white" : "bg-slate-900 text-white";
+      // Dark mode class helpers
+      const bg     = dark ? "bg-gray-900"  : "bg-slate-50";
+      const hdrBg  = dark ? "bg-gray-900 border-gray-700"  : "bg-white border-slate-200";
+      const filBg  = dark ? "bg-gray-800 border-gray-700"  : "bg-slate-50 border-slate-100";
+      const segBg  = dark ? "bg-gray-700 border-gray-600"  : "bg-white border-slate-200";
+      const segAct = dark ? "bg-gray-500 text-white"        : "bg-slate-900 text-white";
       const segIn  = dark ? "text-gray-400 hover:bg-gray-600" : "text-slate-500 hover:bg-slate-100";
       const grpAct = "bg-blue-600 text-white";
       const grpIn  = dark ? "text-gray-400 hover:bg-gray-600" : "text-slate-500 hover:bg-slate-100";
+      const textMain = dark ? "text-gray-100" : "text-slate-900";
+      const textMuted= dark ? "text-gray-500" : "text-slate-500";
 
       return (
         <DarkCtx.Provider value={dark}>
         <div className={cx("min-h-screen transition-colors duration-200", bg)}>
 
-          {/* ── Top bar ─────────────────────────────────────────────────────── */}
+          {/* ── Sticky header ────────────────────────────────────────────────── */}
           <div className={cx("border-b sticky top-0 z-20 shadow-sm", hdrBg)}>
+
+            {/* Row 1: logo + actions */}
             <div className="max-w-5xl mx-auto px-4 py-2.5 flex items-center justify-between gap-2">
               <div className="flex items-center gap-2">
                 <svg width="18" height="18" fill="none" stroke="#3b82f6" strokeWidth="2" viewBox="0 0 24 24">
                   <path d="M18 10h-1.26A8 8 0 1 0 9 20h9a5 5 0 0 0 0-10z"/>
                 </svg>
-                <span className={cx("font-semibold text-sm", dark ? "text-gray-100" : "text-slate-900")}>Azure Cost</span>
+                <span className={cx("font-semibold text-sm", textMain)}>Azure Cost</span>
                 {data && data.isTest && (
                   <span className="text-xs bg-amber-100 text-amber-700 px-1.5 py-0.5 rounded font-medium">TEST</span>
                 )}
               </div>
               <div className="flex items-center gap-1.5">
-                {/* Dark mode toggle */}
                 <button onClick={() => { const n = !dark; setDark(n); try { localStorage.setItem("dark", n?"1":"0"); } catch {} }}
-                  className={cx("w-7 h-7 flex items-center justify-center rounded-md text-lg transition-colors",
+                  className={cx("w-7 h-7 flex items-center justify-center rounded-md text-base transition-colors",
                     dark ? "bg-gray-700 hover:bg-gray-600" : "bg-slate-100 hover:bg-slate-200")}>
                   {dark ? "☀️" : "🌙"}
                 </button>
@@ -1744,123 +2069,147 @@
                              : "border-slate-200 text-slate-500 hover:bg-slate-50")}>
                   {testMode ? "Test data" : "Test"}
                 </button>
-                <button onClick={onChangeSubs} className={cx("text-xs px-2 py-1 rounded border font-medium transition-colors",
-                  dark ? "border-gray-600 text-gray-400 hover:bg-gray-700" : "border-slate-200 text-slate-600 hover:bg-slate-50")}>
+                <button onClick={onChangeSubs}
+                  className={cx("text-xs px-2 py-1 rounded border font-medium transition-colors",
+                    dark ? "border-gray-600 text-gray-400 hover:bg-gray-700" : "border-slate-200 text-slate-600 hover:bg-slate-50")}>
                   Subs
                 </button>
-                <button onClick={onSignOut} className={cx("text-xs px-2 py-1 rounded font-medium transition-colors",
-                  dark ? "text-gray-500 hover:bg-gray-700" : "text-slate-400 hover:bg-slate-100")}>
+                <button onClick={onSignOut}
+                  className={cx("text-xs px-2 py-1 rounded font-medium transition-colors",
+                    dark ? "text-gray-500 hover:bg-gray-700" : "text-slate-400 hover:bg-slate-100")}>
                   Out
                 </button>
               </div>
             </div>
 
-            {/* ── Filter bar: 2 rows, no overflow ──────────────────────────── */}
-            <div className={cx("border-t px-4 py-2 space-y-2", filBg)}>
-              {/* Row 1: date range + status + refresh */}
-              <div className="flex items-center gap-2">
-                <div className={cx("flex gap-0.5 rounded-md p-0.5 border flex-shrink-0", segBg)}>
-                  {[7, 30, 90].map(n => (
-                    <button key={n} onClick={() => setDays(n)}
-                      className={cx("px-2.5 py-1 text-xs font-semibold rounded transition-colors",
-                        days === n ? segAct : segIn)}>
-                      {n}d
-                    </button>
-                  ))}
-                </div>
-                <div className="flex-1" />
-                {data && (
-                  <span className={cx("text-xs flex-shrink-0 hidden sm:block", dark ? "text-gray-500" : "text-slate-400")}>
-                    {data.isTest ? "Test" : data.fromCache ? `${cacheAge}m ago` : "Fresh"} · {data.records.length.toLocaleString()}
-                  </span>
-                )}
-                <button onClick={() => load(true)} disabled={loading}
-                  className={cx("text-xs px-2 py-1 rounded border font-medium flex items-center gap-1 transition-colors",
-                    dark ? "border-gray-600 text-gray-400 hover:bg-gray-700" : "border-slate-200 text-slate-600 hover:bg-slate-50")}>
-                  {loading ? <Spinner size={11} /> : "↻"} Refresh
-                </button>
-              </div>
-              {/* Row 2: grouping (full width, wraps naturally) */}
-              <div className={cx("flex gap-0.5 rounded-md p-0.5 border w-full", segBg)}>
-                {GROUP_OPTS.map(o => (
-                  <button key={o.id} onClick={() => setGroupId(o.id)}
-                    className={cx("flex-1 py-1 text-xs font-semibold rounded transition-colors text-center",
-                      groupId === o.id ? grpAct : grpIn)}>
-                    {o.label}
+            {/* Row 2: Tab bar */}
+            <div className={cx("border-t px-4", dark ? "border-gray-700" : "border-slate-100")}>
+              <div className="max-w-5xl mx-auto flex gap-0">
+                {[
+                  { id: "home",   label: "Dashboard",
+                    badge: null },
+                  { id: "alerts", label: "Alerts",
+                    badge: alerts.filter(a => a.tier === "critical" || a.tier === "warning").length || null }
+                ].map(tab => (
+                  <button key={tab.id} onClick={() => setActiveTab(tab.id)}
+                    className={cx(
+                      "flex items-center gap-1.5 px-4 py-2.5 text-xs font-semibold border-b-2 transition-colors",
+                      activeTab === tab.id
+                        ? (dark ? "border-blue-400 text-blue-400" : "border-blue-600 text-blue-600")
+                        : (dark ? "border-transparent text-gray-400 hover:text-gray-200" : "border-transparent text-slate-500 hover:text-slate-700")
+                    )}>
+                    {tab.label}
+                    {tab.badge > 0 && (
+                      <span className="text-xs px-1.5 py-0.5 rounded-full bg-red-500 text-white font-bold leading-none">
+                        {tab.badge}
+                      </span>
+                    )}
                   </button>
                 ))}
               </div>
             </div>
+
+            {/* Row 3: Filter bar — Home tab only */}
+            {activeTab === "home" && (
+              <div className={cx("border-t px-4 py-2 space-y-2", filBg)}>
+                <div className="flex items-center gap-2">
+                  <div className={cx("flex gap-0.5 rounded-md p-0.5 border flex-shrink-0", segBg)}>
+                    {[7, 30, 90].map(n => (
+                      <button key={n} onClick={() => setDays(n)}
+                        className={cx("px-2.5 py-1 text-xs font-semibold rounded transition-colors", days === n ? segAct : segIn)}>
+                        {n}d
+                      </button>
+                    ))}
+                  </div>
+                  <div className="flex-1" />
+                  {data && (
+                    <span className={cx("text-xs flex-shrink-0 hidden sm:block", textMuted)}>
+                      {data.isTest ? "Test" : data.fromCache ? `${cacheAge}m ago` : "Fresh"} · {data.records.length.toLocaleString()}
+                    </span>
+                  )}
+                  <button onClick={() => load(true)} disabled={loading}
+                    className={cx("text-xs px-2 py-1 rounded border font-medium flex items-center gap-1 transition-colors",
+                      dark ? "border-gray-600 text-gray-400 hover:bg-gray-700" : "border-slate-200 text-slate-600 hover:bg-slate-50")}>
+                    {loading ? <Spinner size={11} /> : "↻"} Refresh
+                  </button>
+                </div>
+                <div className={cx("flex gap-0.5 rounded-md p-0.5 border w-full", segBg)}>
+                  {GROUP_OPTS.map(o => (
+                    <button key={o.id} onClick={() => setGroupId(o.id)}
+                      className={cx("flex-1 py-1 text-xs font-semibold rounded transition-colors text-center",
+                        groupId === o.id ? grpAct : grpIn)}>
+                      {o.label}
+                    </button>
+                  ))}
+                </div>
+              </div>
+            )}
           </div>
 
-          {/* ── Page content ─────────────────────────────────────────────────── */}
+          {/* ── Page content ──────────────────────────────────────────────────── */}
           <div className="max-w-5xl mx-auto px-4 py-4 space-y-4">
-            <ErrMsg msg={error} />
 
-            {/* Loading */}
-            {loading && (
-              <Card className="p-10">
-                <div className="flex flex-col items-center gap-3">
-                  <Spinner size={28} className="text-blue-400" />
-                  <div className={cx("text-sm font-medium", dark ? "text-gray-300" : "text-slate-600")}>{progress}</div>
-                  <div className={cx("text-xs text-center max-w-xs", dark ? "text-gray-500" : "text-slate-400")}>
-                    First load may take 15–30s — PAYG API paginates 1,000 records at a time.
-                  </div>
-                </div>
-              </Card>
+            {/* ── ALERTS TAB ─────────────────────────────────────────────────── */}
+            {activeTab === "alerts" && (
+              <AlertsTab records={data?.records || []} currency={data?.currency || "USD"} />
             )}
 
-            {/* Empty */}
-            {!loading && data && data.records.length === 0 && (
-              <Card className="p-8 text-center">
-                <div className="text-3xl mb-2">🔍</div>
-                <h3 className={cx("font-semibold", dark ? "text-gray-200" : "text-slate-700")}>No cost data found</h3>
-                <p className={cx("text-sm mt-1", dark ? "text-gray-500" : "text-slate-500")}>
-                  No usage records in the last {days} days. Try a wider range or switch to test data.
-                </p>
-              </Card>
-            )}
-
-            {/* Dashboard */}
-            {!loading && data && data.records.length > 0 && stats && (
+            {/* ── HOME TAB ───────────────────────────────────────────────────── */}
+            {activeTab === "home" && (
               <>
-                {/* KPI row — compact single row */}
-                <div className="grid grid-cols-4 gap-2">
-                  <KpiCard label={`${days}d total`} value={fmt(stats.total, data.currency)} />
-                  <KpiCard label="Daily avg"  value={fmt(stats.avgDaily, data.currency)} />
-                  <KpiCard label="Peak day"   value={fmt(stats.peakDay.cost, data.currency)} sub={stats.peakDay.date ? stats.peakDay.date.slice(5) : ""} />
-                  <KpiCard
-                    label="Mth forecast"
-                    value={forecast ? fmt(forecast.projected, data.currency) : "—"}
-                    trend={forecast && forecast.mtd > 0
-                      ? ((forecast.projected - forecast.mtd / (forecast.daysInMonth - forecast.daysLeft) * forecast.daysInMonth)
-                         / (forecast.mtd / (forecast.daysInMonth - forecast.daysLeft) * forecast.daysInMonth)) * 100
-                      : null}
-                  />
-                </div>
+                <ErrMsg msg={error} />
 
-                {/* Intelligence alerts — Pass 2 will render full cards; for now show debug summary */}
-                {alerts.length > 0 && (
-                  <AlertsSummaryDebug alerts={alerts} currency={data.currency} dark={dark} />
+                {loading && (
+                  <div className={cx("rounded-xl border shadow-sm p-10 flex flex-col items-center gap-3",
+                    dark ? "bg-gray-800 border-gray-700" : "bg-white border-slate-200")}>
+                    <Spinner size={28} className="text-blue-400" />
+                    <div className={cx("text-sm font-medium", dark ? "text-gray-300" : "text-slate-600")}>{progress}</div>
+                    <div className={cx("text-xs text-center max-w-xs", textMuted)}>
+                      First load may take 15–30s for PAYG subscriptions.
+                    </div>
+                  </div>
                 )}
 
-                {/* Time series */}
-                <TimeSeriesChart
-                  records={data.records} currency={data.currency}
-                  from={data.from} to={data.to} days={days}
-                  groupOpt={groupOpt}
-                  bucket={bucket} setBucket={setBucket}
-                  style={style} setStyle={setStyle}
-                />
+                {!loading && data && data.records.length === 0 && (
+                  <div className={cx("rounded-xl border shadow-sm p-8 text-center",
+                    dark ? "bg-gray-800 border-gray-700" : "bg-white border-slate-200")}>
+                    <div className="text-3xl mb-2">🔍</div>
+                    <h3 className={cx("font-semibold", dark ? "text-gray-200" : "text-slate-700")}>No cost data found</h3>
+                    <p className={cx("text-sm mt-1", textMuted)}>Try a wider range or switch to test data.</p>
+                  </div>
+                )}
 
-                {/* Top movers — directly below time series */}
-                <MoversCard records={data.records} days={days} currency={data.currency} groupOpt={groupOpt} />
+                {!loading && data && data.records.length > 0 && stats && (
+                  <>
+                    {/* KPI row */}
+                    <div className="grid grid-cols-4 gap-2">
+                      <KpiCard label={`${days}d total`} value={fmt(stats.total, data.currency)} />
+                      <KpiCard label="Daily avg" value={fmt(stats.avgDaily, data.currency)} />
+                      <KpiCard label="Peak day" value={fmt(stats.peakDay.cost, data.currency)} sub={stats.peakDay.date ? stats.peakDay.date.slice(5) : ""} />
+                      <KpiCard label="Mth forecast"
+                        value={forecast ? fmt(forecast.projected, data.currency) : "—"}
+                        trend={forecast && forecast.mtd > 0
+                          ? ((forecast.projected - forecast.mtd / Math.max(forecast.daysInMonth - forecast.daysLeft, 1) * forecast.daysInMonth)
+                             / (forecast.mtd / Math.max(forecast.daysInMonth - forecast.daysLeft, 1) * forecast.daysInMonth)) * 100
+                          : null}
+                      />
+                    </div>
 
-                {/* Bar chart breakdown */}
-                <GroupChart records={data.records} currency={data.currency} groupOpt={groupOpt} />
+                    {/* Insight cards */}
+                    {alerts.length > 0 && <InsightCards alerts={alerts} dark={dark} />}
 
-                {/* Detail table */}
-                <DetailTable records={data.records} currency={data.currency} total={stats.total} groupOpt={groupOpt} />
+                    {/* Charts */}
+                    <TimeSeriesChart
+                      records={data.records} currency={data.currency}
+                      from={data.from} to={data.to} days={days}
+                      groupOpt={groupOpt} bucket={bucket} setBucket={setBucket}
+                      style={style} setStyle={setStyle}
+                    />
+                    <MoversCard records={data.records} days={days} currency={data.currency} groupOpt={groupOpt} />
+                    <GroupChart records={data.records} currency={data.currency} groupOpt={groupOpt} />
+                    <DetailTable records={data.records} currency={data.currency} total={stats.total} groupOpt={groupOpt} />
+                  </>
+                )}
               </>
             )}
           </div>
