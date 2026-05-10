@@ -94,6 +94,50 @@
     const CACHE_TTL_MS = 6 * 60 * 60 * 1000;
 
     // =========================================================================
+    // TEST DATA — rich synthetic dataset covering all dimensions
+    // =========================================================================
+    function generateTestData(days) {
+      const RESOURCES = [
+        { name: "asp-prod-plan",       service: "Microsoft.Web",               rg: "rg-prod",    location: "australiaeast",  baseCost: 5.0  },
+        { name: "app-api-prod",        service: "Microsoft.Web",               rg: "rg-prod",    location: "australiaeast",  baseCost: 1.2  },
+        { name: "stg-prod-assets",     service: "Microsoft.Storage",           rg: "rg-prod",    location: "australiaeast",  baseCost: 0.4  },
+        { name: "stg-staging-data",    service: "Microsoft.Storage",           rg: "rg-staging", location: "australiasouth", baseCost: 0.1  },
+        { name: "sql-prod-db",         service: "Microsoft.Sql",               rg: "rg-prod",    location: "australiaeast",  baseCost: 2.8  },
+        { name: "vm-dev-build",        service: "Microsoft.Compute",           rg: "rg-dev",     location: "southeastasia",  baseCost: 0.9  },
+        { name: "cog-search-prod",     service: "Microsoft.CognitiveServices", rg: "rg-shared",  location: "australiaeast",  baseCost: 0.3  },
+        { name: "vnet-prod",           service: "Microsoft.Network",           rg: "rg-shared",  location: "australiaeast",  baseCost: 0.05 },
+      ];
+      const seed = (x) => Math.abs(Math.sin(x * 127.1 + 311.7));
+      const today = new Date();
+      const records = [];
+      for (let d = days - 1; d >= 0; d--) {
+        const dt = new Date(today);
+        dt.setUTCDate(dt.getUTCDate() - d);
+        const iso = dt.toISOString().slice(0, 10);
+        const dayIndex = days - 1 - d;
+        const progress = dayIndex / days;
+        for (const res of RESOURCES) {
+          const trend    = res.rg === "rg-prod" ? 1 + progress * 0.4 : res.rg === "rg-dev" ? 1 - progress * 0.2 : 1;
+          const dow      = dt.getUTCDay();
+          const seasonal = (dow === 0 || dow === 6) ? 0.7 : 1.0;
+          const spike    = (res.name === "asp-prod-plan" && dayIndex > days * 0.55 && dayIndex < days * 0.85) ? 2.2 : 1.0;
+          const noise    = 0.85 + seed(dayIndex * 13 + RESOURCES.indexOf(res)) * 0.3;
+          records.push({
+            date: iso, cost: parseFloat((res.baseCost * trend * seasonal * spike * noise).toFixed(4)),
+            currency: "AUD", service: res.service, resourceGroup: res.rg,
+            resourceName: res.name, location: res.location, subName: "Test Subscription"
+          });
+        }
+      }
+      const from = new Date(today); from.setUTCDate(from.getUTCDate() - days);
+      return {
+        currency: "AUD", fetchedAt: Date.now(), isTest: true, fromCache: false, days,
+        from: from.toISOString().slice(0, 10), to: today.toISOString().slice(0, 10), records
+      };
+    }
+
+
+    // =========================================================================
     // PKCE
     // =========================================================================
     const b64url = buf => btoa(String.fromCharCode(...new Uint8Array(buf)))
@@ -632,13 +676,13 @@
     function KpiCard({ label, value, sub, trend }) {
       const color = trend == null ? "" : trend > 0 ? "text-rose-600" : "text-emerald-600";
       return (
-        <Card className="p-4">
-          <div className="text-xs text-slate-500 uppercase tracking-wide font-medium">{label}</div>
-          <div className="mt-1 text-xl font-bold text-slate-900 truncate">{value}</div>
-          {sub && <div className="text-xs text-slate-400 mt-0.5 truncate">{sub}</div>}
+        <Card className="p-2.5 sm:p-3">
+          <div className="text-xs text-slate-400 font-medium truncate leading-tight">{label}</div>
+          <div className="mt-0.5 text-base sm:text-lg font-bold text-slate-900 truncate leading-tight">{value}</div>
+          {sub && <div className="text-xs text-slate-400 truncate hidden sm:block">{sub}</div>}
           {trend != null && (
-            <div className={cx("text-xs font-medium mt-1.5", color)}>
-              {trend > 0 ? "▲" : "▼"} {Math.abs(trend).toFixed(1)}% vs prior period
+            <div className={cx("text-xs font-semibold mt-0.5 leading-tight", color)}>
+              {trend > 0 ? "▲" : "▼"}{Math.abs(trend).toFixed(0)}%
             </div>
           )}
         </Card>
@@ -934,23 +978,29 @@
     // Main Dashboard
     // =========================================================================
     function Dashboard({ selected, allSubs, onChangeSubs, onSignOut }) {
-      const [days, setDays]   = useState(30);
-      const [data, setData]   = useState(null);
+      const [days, setDays]     = useState(30);
+      const [data, setData]     = useState(null);
       const [loading, setLoading] = useState(true);
       const [progress, setProgress] = useState("");
-      const [error, setError] = useState(null);
+      const [error, setError]   = useState(null);
+      const [testMode, setTestMode] = useState(false);
 
-      // Shared grouping state — controls both time series and bar chart
+      // Shared grouping — controls time-series, bar chart AND movers
       const [groupId, setGroupId] = useState("service");
 
-      // Time series specific state
-      const [bucket, setBucket]   = useState(() => defaultBucket(30));
-      const [style, setStyle]     = useState("stacked");
+      // Time series controls
+      const [bucket, setBucket] = useState(() => defaultBucket(30));
+      const [style, setStyle]   = useState("stacked");
 
-      // When days changes, update default bucket
+      // When days changes reset to widest sensible bucket
       useEffect(() => { setBucket(defaultBucket(days)); }, [days]);
 
       const load = useCallback(async (force = false) => {
+        if (testMode) {
+          setData(generateTestData(days));
+          setLoading(false);
+          return;
+        }
         setError(null);
         setLoading(true);
         setProgress("Loading…");
@@ -963,81 +1013,102 @@
           setLoading(false);
           setProgress("");
         }
-      }, [selected, allSubs, days]);
+      }, [selected, allSubs, days, testMode]);
 
       useEffect(() => { load(false); }, [load]);
 
-      const stats = useMemo(() => data ? calcStats(data.records, days) : null, [data, days]);
-      const cacheAge = data ? Math.round((Date.now() - data.fetchedAt) / 60000) : 0;
+      // Toggle test mode — regenerate immediately
+      const toggleTestMode = () => {
+        const next = !testMode;
+        setTestMode(next);
+        if (next) { setData(generateTestData(days)); setLoading(false); }
+        else { setData(null); setLoading(true); }
+      };
 
-      // Current grouping option object
+      const stats   = useMemo(() => data ? calcStats(data.records, days) : null, [data, days]);
+      const cacheAge = data ? Math.round((Date.now() - data.fetchedAt) / 60000) : 0;
       const groupOpt = GROUP_OPTS.find(o => o.id === groupId) || GROUP_OPTS[0];
 
       return (
         <div className="min-h-screen bg-slate-50">
-          {/* Top bar */}
-          <div className="bg-white border-b border-slate-200 sticky top-0 z-10 shadow-sm">
-            <div className="max-w-5xl mx-auto px-4 py-3 flex items-center justify-between">
+
+          {/* ── Top bar ─────────────────────────────────────────────────────── */}
+          <div className="bg-white border-b border-slate-200 sticky top-0 z-20 shadow-sm">
+            <div className="max-w-5xl mx-auto px-4 py-2.5 flex items-center justify-between gap-2">
               <div className="flex items-center gap-2">
-                <svg width="20" height="20" fill="none" stroke="#2563eb" strokeWidth="2" viewBox="0 0 24 24">
+                <svg width="18" height="18" fill="none" stroke="#2563eb" strokeWidth="2" viewBox="0 0 24 24">
                   <path d="M18 10h-1.26A8 8 0 1 0 9 20h9a5 5 0 0 0 0-10z"/>
                 </svg>
                 <span className="font-semibold text-slate-900 text-sm">Azure Cost</span>
+                {data && data.isTest && (
+                  <span className="text-xs bg-amber-100 text-amber-700 px-1.5 py-0.5 rounded font-medium">TEST</span>
+                )}
               </div>
-              <div className="flex items-center gap-2">
-                <Btn variant="secondary" onClick={onChangeSubs} small>Subscriptions</Btn>
-                <Btn variant="ghost" onClick={onSignOut} small>Sign out</Btn>
+              <div className="flex items-center gap-1.5">
+                <button onClick={toggleTestMode}
+                  className={cx("text-xs px-2 py-1 rounded border font-medium transition-colors",
+                    testMode ? "bg-amber-500 text-white border-amber-500" : "border-slate-200 text-slate-500 hover:bg-slate-50")}>
+                  {testMode ? "Test data" : "Test"}
+                </button>
+                <Btn variant="secondary" onClick={onChangeSubs} small>Subs</Btn>
+                <Btn variant="ghost" onClick={onSignOut} small>Out</Btn>
+              </div>
+            </div>
+
+            {/* ── Sticky filter bar ────────────────────────────────────────── */}
+            <div className="border-t border-slate-100 bg-slate-50">
+              <div className="max-w-5xl mx-auto px-4 py-2 flex items-center gap-2 overflow-x-auto">
+                {/* Date range */}
+                <div className="flex gap-0.5 bg-white border border-slate-200 rounded-md p-0.5 flex-shrink-0">
+                  {[7, 30, 90].map(n => (
+                    <button key={n} onClick={() => setDays(n)}
+                      className={cx("px-2.5 py-1 text-xs font-semibold rounded transition-colors whitespace-nowrap",
+                        days === n ? "bg-slate-900 text-white" : "text-slate-500 hover:bg-slate-100")}>
+                      {n}d
+                    </button>
+                  ))}
+                </div>
+
+                <div className="w-px h-5 bg-slate-200 flex-shrink-0" />
+
+                {/* Grouping */}
+                <div className="flex gap-0.5 bg-white border border-slate-200 rounded-md p-0.5 flex-shrink-0">
+                  {GROUP_OPTS.map(o => (
+                    <button key={o.id} onClick={() => setGroupId(o.id)}
+                      className={cx("px-2.5 py-1 text-xs font-semibold rounded transition-colors whitespace-nowrap",
+                        groupId === o.id ? "bg-blue-600 text-white" : "text-slate-500 hover:bg-slate-100")}>
+                      {o.label}
+                    </button>
+                  ))}
+                </div>
+
+                <div className="flex-1" />
+
+                {/* Status + refresh */}
+                {data && (
+                  <span className="text-xs text-slate-400 flex-shrink-0 hidden sm:block">
+                    {data.isTest ? "Test data" : data.fromCache ? `${cacheAge}m ago` : "Fresh"} · {data.records.length.toLocaleString()}
+                  </span>
+                )}
+                <Btn variant="secondary" onClick={() => load(true)} disabled={loading} small>
+                  {loading ? <Spinner size={11} /> : "↻"}
+                </Btn>
               </div>
             </div>
           </div>
 
-          <div className="max-w-5xl mx-auto px-4 py-5 space-y-4">
-            {/* Controls row */}
-            <div className="flex flex-wrap items-center justify-between gap-2">
-              {/* Date range */}
-              <div className="flex gap-1 bg-white border border-slate-200 rounded-lg p-1 shadow-sm">
-                {[7, 30, 90].map(n => (
-                  <button key={n} onClick={() => setDays(n)}
-                    className={cx("px-3 py-1.5 text-xs font-semibold rounded-md transition-colors",
-                      days === n ? "bg-slate-900 text-white" : "text-slate-500 hover:bg-slate-100")}>
-                    {n}d
-                  </button>
-                ))}
-              </div>
-
-              {/* Grouping — shared between time series and bar chart */}
-              <div className="flex gap-1 bg-white border border-slate-200 rounded-lg p-1 shadow-sm">
-                {GROUP_OPTS.map(o => (
-                  <button key={o.id} onClick={() => setGroupId(o.id)}
-                    className={cx("px-2.5 py-1.5 text-xs font-semibold rounded-md transition-colors",
-                      groupId === o.id ? "bg-blue-600 text-white" : "text-slate-500 hover:bg-slate-100")}>
-                    {o.label}
-                  </button>
-                ))}
-              </div>
-
-              <div className="flex items-center gap-2">
-                {data && (
-                  <span className="text-xs text-slate-400">
-                    {data.fromCache ? `Cached ${cacheAge}m ago` : "Fresh"} · {data.records.length.toLocaleString()} records
-                  </span>
-                )}
-                <Btn variant="secondary" onClick={() => load(true)} disabled={loading} small>
-                  {loading ? <Spinner size={12} /> : "↻"} Refresh
-                </Btn>
-              </div>
-            </div>
-
+          {/* ── Page content ─────────────────────────────────────────────────── */}
+          <div className="max-w-5xl mx-auto px-4 py-4 space-y-4">
             <ErrMsg msg={error} />
 
             {/* Loading */}
             {loading && (
               <Card className="p-10">
                 <div className="flex flex-col items-center gap-3">
-                  <Spinner size={32} className="text-blue-400" />
+                  <Spinner size={28} className="text-blue-400" />
                   <div className="text-sm text-slate-600 font-medium">{progress}</div>
                   <div className="text-xs text-slate-400 text-center max-w-xs">
-                    First load may take 15–30 seconds — the PAYG usage API paginates records in batches of 1,000.
+                    First load may take 15–30s — PAYG API paginates 1,000 records at a time.
                   </div>
                 </div>
               </Card>
@@ -1049,43 +1120,40 @@
                 <div className="text-3xl mb-2">🔍</div>
                 <h3 className="font-semibold text-slate-700">No cost data found</h3>
                 <p className="text-sm text-slate-500 mt-1">
-                  No usage records in the last {days} days. Try a wider time range or check your subscription has activity.
+                  No usage records in the last {days} days. Try a wider range or switch to test data.
                 </p>
               </Card>
             )}
 
-            {/* Dashboard content */}
+            {/* Dashboard */}
             {!loading && data && data.records.length > 0 && stats && (
               <>
-                {/* KPI cards */}
-                <div className="grid grid-cols-2 lg:grid-cols-4 gap-3">
-                  <KpiCard label={`Total (${days}d)`} value={fmt(stats.total, data.currency)} sub={`${data.from} to ${data.to}`} />
-                  <KpiCard label="Daily avg" value={fmt(stats.avgDaily, data.currency)} />
-                  <KpiCard label="Peak day" value={fmt(stats.peakDay.cost, data.currency)} sub={stats.peakDay.date} />
+                {/* KPI row — compact single row */}
+                <div className="grid grid-cols-4 gap-2">
+                  <KpiCard label={`${days}d total`} value={fmt(stats.total, data.currency)} />
+                  <KpiCard label="Daily avg"  value={fmt(stats.avgDaily, data.currency)} />
+                  <KpiCard label="Peak day"   value={fmt(stats.peakDay.cost, data.currency)} sub={stats.peakDay.date ? stats.peakDay.date.slice(5) : ""} />
                   <KpiCard label="Trend"
-                    value={stats.trendPct != null ? `${stats.trendPct > 0 ? "+" : ""}${stats.trendPct.toFixed(1)}%` : "N/A"}
-                    sub={`${fmt(stats.recent, data.currency)} vs ${fmt(stats.earlier, data.currency)}`}
+                    value={stats.trendPct != null ? `${stats.trendPct > 0 ? "+" : ""}${stats.trendPct.toFixed(0)}%` : "N/A"}
                     trend={stats.trendPct} />
                 </div>
 
-                {/* Time series — uses shared groupOpt + local bucket/style */}
+                {/* Time series */}
                 <TimeSeriesChart
-                  records={data.records}
-                  currency={data.currency}
-                  from={data.from}
-                  to={data.to}
-                  days={days}
+                  records={data.records} currency={data.currency}
+                  from={data.from} to={data.to} days={days}
                   groupOpt={groupOpt}
-                  bucket={bucket}
-                  setBucket={setBucket}
-                  style={style}
-                  setStyle={setStyle}
+                  bucket={bucket} setBucket={setBucket}
+                  style={style} setStyle={setStyle}
                 />
 
-                {/* Bar chart — uses shared groupOpt */}
+                {/* Top movers — directly below time series */}
+                <MoversCard records={data.records} days={days} currency={data.currency} groupOpt={groupOpt} />
+
+                {/* Bar chart breakdown */}
                 <GroupChart records={data.records} currency={data.currency} groupOpt={groupOpt} />
 
-                <MoversCard records={data.records} days={days} currency={data.currency} groupOpt={groupOpt} />
+                {/* Detail table */}
                 <DetailTable records={data.records} currency={data.currency} total={stats.total} />
               </>
             )}
