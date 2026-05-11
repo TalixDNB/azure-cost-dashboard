@@ -525,24 +525,30 @@
     }
 
     // Build a flat (single-series) time series for the chosen bucket, no grouping.
-    function buildTimeSeries(records, from, to, bucket) {
-      // Sum costs by bucket key
+    function buildTimeSeries(records, from, to, bucket, forecastPoints) {
       const sums = {};
-      const labelByKey = {};
       for (const r of records) {
         if (!r.date) continue;
         const { key, label } = bucketDate(r.date, bucket);
         sums[key] = (sums[key] || 0) + r.cost;
-        labelByKey[key] = label;
       }
-      // Fill all buckets in range so the chart has continuous x-axis
       const keysSeen = new Set();
       const out = [];
       for (const iso of iterDays(from, to)) {
         const { key, label } = bucketDate(iso, bucket);
         if (keysSeen.has(key)) continue;
         keysSeen.add(key);
-        out.push({ key, label, total: sums[key] || 0 });
+        out.push({ key, label, total: sums[key] || 0, forecast: null });
+      }
+      // Append forecast extension (only in daily bucket to keep chart clean)
+      if (forecastPoints && bucket === "day") {
+        // Anchor: set last actual point also as forecast start for smooth join
+        if (out.length > 0) out[out.length - 1].forecast = out[out.length - 1].total;
+        for (const fp of forecastPoints) {
+          if (keysSeen.has(fp.key)) continue;
+          keysSeen.add(fp.key);
+          out.push({ key: fp.key, label: fp.label, total: null, forecast: fp.forecast });
+        }
       }
       out.sort((a, b) => a.key.localeCompare(b.key));
       return out;
@@ -643,14 +649,26 @@
       popPct: 50,
       tierAbsolute: "warning",
       tierPct: "watch",
+      monthlyBudget: 200,   // overall total monthly budget (shown in progress bar)
       enabled: true
     };
 
     // Ensure global defaults exist in localStorage on first use.
+    // Always merges with THRESHOLD_DEFAULTS so new fields appear for existing users.
     function ensureGlobalThreshold() {
       const raw = kv.get("thresholds:global");
-      if (!raw) kv.set("thresholds:global", THRESHOLD_DEFAULTS);
-      return raw ? JSON.parse(raw) : { ...THRESHOLD_DEFAULTS };
+      if (!raw) {
+        kv.set("thresholds:global", THRESHOLD_DEFAULTS);
+        return { ...THRESHOLD_DEFAULTS };
+      }
+      const stored = JSON.parse(raw);
+      // Merge: defaults fill in any keys missing from older stored versions
+      const merged = { ...THRESHOLD_DEFAULTS, ...stored };
+      // If we added new keys, persist the merged version
+      if (Object.keys(merged).length !== Object.keys(stored).length) {
+        kv.set("thresholds:global", merged);
+      }
+      return merged;
     }
 
     // Resolve the effective threshold for a resource using the cascade:
@@ -727,30 +745,74 @@
     }
 
     // Project month-end spend from records.
+    // Compute a smart daily rate that handles sudden resource shutoffs and spikes.
+    function computeSmartDailyRate(dailyCosts) {
+      // dailyCosts: array of numbers (oldest → newest), one per day
+      if (!dailyCosts.length) return 0;
+      if (dailyCosts.length === 1) return dailyCosts[0];
+
+      const last3  = dailyCosts.slice(-3);
+      const last7  = dailyCosts.slice(-7);
+      const prior  = dailyCosts.slice(0, -7);
+
+      const avg = arr => arr.length ? arr.reduce((s, v) => s + v, 0) / arr.length : 0;
+      const last3Avg  = avg(last3);
+      const last7Avg  = avg(last7);
+      const priorAvg  = avg(prior);
+
+      // ① Turnoff detection: last 3 days < 5% of prior average → resource off
+      if (priorAvg > 0.5 && last3Avg < priorAvg * 0.05) {
+        return last3Avg; // near-zero
+      }
+
+      // ② Spike suppression: last 3 days > 5× prior → likely one-off spike
+      // Use last 7 avg instead to avoid inflating forecast
+      if (priorAvg > 0.5 && last3Avg > priorAvg * 5) {
+        return last7Avg;
+      }
+
+      // ③ Sharp drop (not zero): last 3 days < 40% of prior → use recent rate only
+      if (priorAvg > 0.5 && last3Avg < priorAvg * 0.40) {
+        return last7Avg;
+      }
+
+      // ④ Normal case: weighted blend (recent 2×, prior 1×)
+      if (prior.length >= 3) {
+        return (last7Avg * 2 + priorAvg) / 3;
+      }
+      return last7Avg;
+    }
+
     function projectMonthEnd(records, currency) {
       const now   = new Date();
-      const dom   = now.getUTCDate();
       const daysInMonth = new Date(now.getUTCFullYear(), now.getUTCMonth() + 1, 0).getDate();
-      const daysLeft = daysInMonth - dom;
+      const daysLeft = daysInMonth - now.getUTCDate();
 
-      // Use last 7 days average as rate (weighted 2× vs older data)
-      const cutoff7 = new Date(now); cutoff7.setUTCDate(cutoff7.getUTCDate() - 7);
-      const cutoff7iso = cutoff7.toISOString().slice(0, 10);
-      const recent = records.filter(r => r.date >= cutoff7iso);
-      const older  = records.filter(r => r.date <  cutoff7iso);
+      // Build daily cost map
+      const byDate = {};
+      for (const r of records) byDate[r.date] = (byDate[r.date] || 0) + r.cost;
 
-      const recentTotal = recent.reduce((s, r) => s + r.cost, 0);
-      const olderTotal  = older.reduce((s, r) => s + r.cost, 0);
-      const recentDays  = Math.max(recent.length > 0 ? new Set(recent.map(r => r.date)).size : 1, 1);
-      const olderDays   = Math.max(older.length  > 0 ? new Set(older.map(r => r.date)).size  : 1, 1);
+      // Build sorted daily array from all data
+      const sortedDates = Object.keys(byDate).sort();
+      const dailyCosts  = sortedDates.map(d => byDate[d]);
 
-      const dailyRate = olderDays > 3
-        ? (recentTotal / recentDays * 2 + olderTotal / olderDays) / 3
-        : recentTotal / recentDays;
+      const dailyRate = computeSmartDailyRate(dailyCosts);
 
       // Month-to-date spend
       const monthStart = new Date(now.getUTCFullYear(), now.getUTCMonth(), 1).toISOString().slice(0, 10);
       const mtd = records.filter(r => r.date >= monthStart).reduce((s, r) => s + r.cost, 0);
+
+      // Build per-day forecast points for chart extension (today+1 → end of month)
+      const forecastPoints = [];
+      for (let d = 1; d <= daysLeft; d++) {
+        const dt = new Date(now);
+        dt.setUTCDate(dt.getUTCDate() + d);
+        forecastPoints.push({
+          key:      dt.toISOString().slice(0, 10),
+          label:    dt.toISOString().slice(5, 10),
+          forecast: parseFloat((dailyRate).toFixed(4))
+        });
+      }
 
       return {
         mtd,
@@ -758,8 +820,42 @@
         dailyRate,
         daysLeft,
         daysInMonth,
-        currency
+        currency,
+        forecastPoints  // for chart extension
       };
+    }
+
+    // Compute alert "peak days" for chart markers.
+    // Returns { [isoDate]: [alert] } for dates where signals peaked.
+    function computeAlertDays(alerts, records, days) {
+      const result = {};
+      const byResource = {};
+      for (const r of records) {
+        if (!byResource[r.resourceName]) byResource[r.resourceName] = {};
+        byResource[r.resourceName][r.date] = (byResource[r.resourceName][r.date] || 0) + r.cost;
+      }
+
+      for (const alert of alerts) {
+        const recs = byResource[alert.resourceName];
+        if (!recs) continue;
+        const hasSpikeSignal = alert.triggers.some(t =>
+          t.type === "unusual_jump" || t.type === "threshold_absolute" || t.type === "forecast_breach"
+        );
+        if (!hasSpikeSignal) continue;
+
+        // Find the peak day in last 14 days for this resource
+        const cutoff = new Date(); cutoff.setUTCDate(cutoff.getUTCDate() - 14);
+        const cutoffIso = cutoff.toISOString().slice(0, 10);
+        let peakDate = null, peakCost = 0;
+        for (const [date, cost] of Object.entries(recs)) {
+          if (date >= cutoffIso && cost > peakCost) { peakCost = cost; peakDate = date; }
+        }
+        if (peakDate) {
+          if (!result[peakDate]) result[peakDate] = [];
+          result[peakDate].push(alert);
+        }
+      }
+      return result;
     }
 
     // Core intelligence function.
@@ -1278,141 +1374,264 @@
       );
     }
 
-    function TimeSeriesChart({ records, currency, from, to, days, groupOpt, bucket, setBucket, style, setStyle, showTotal, setShowTotal }) {
-      // Decide what data to render
-      const useGrouping = groupOpt && groupOpt.id !== "total";
+    function TimeSeriesChart({ records, currency, from, to, days, groupOpt, bucket, setBucket, style, setStyle, forecast, alerts, budget }) {
+      const dark = useDark();
+      const [hiddenSeries, setHiddenSeries] = useState(new Set());
+      const [alertPanel, setAlertPanel]     = useState(null); // { x, y, alerts }
+
+      const isGrouped = groupOpt && groupOpt.id !== "total";
+
+      // Compute alert day markers (only for spike/threshold signals)
+      const alertDays = useMemo(() =>
+        computeAlertDays(alerts || [], records, days),
+      [alerts, records, days]);
+
       const series = useMemo(() => {
-        if (!useGrouping) {
-          const flat = buildTimeSeries(records, from, to, bucket);
-          return { rows: flat.map(r => ({ ...r })), groupNames: ["total"] };
+        if (!isGrouped) {
+          const flat = buildTimeSeries(records, from, to, bucket, forecast?.forecastPoints);
+          return { rows: flat, groupNames: ["total"] };
         }
-        return buildGroupedTimeSeries(records, from, to, bucket, groupOpt.fn, 6);
-      }, [records, from, to, bucket, useGrouping, groupOpt && groupOpt.id]);
+        // Grouped: build group series, then append forecast extension points
+        const gs = buildGroupedTimeSeries(records, from, to, bucket, groupOpt.fn, 6);
+        if (forecast?.forecastPoints && bucket === "day") {
+          const seen = new Set(gs.rows.map(r => r.key));
+          const extended = [...gs.rows];
+          for (const fp of forecast.forecastPoints) {
+            const { key, label } = bucketDate(fp.key, bucket);
+            if (seen.has(key)) continue;
+            seen.add(key);
+            const row = { key, label, forecast: fp.forecast };
+            for (const g of gs.groupNames) row[g] = null;
+            extended.push(row);
+          }
+          extended.sort((a, b) => a.key.localeCompare(b.key));
+          return { ...gs, rows: extended };
+        }
+        return gs;
+      }, [records, from, to, bucket, isGrouped, groupOpt && groupOpt.id, forecast]);
 
       const BUCKET_OPTS = [
-        { id: "day",   label: "Daily" },
-        { id: "week",  label: "Weekly" },
+        { id: "day",   label: "Daily"   },
+        { id: "week",  label: "Weekly"  },
         { id: "month", label: "Monthly" },
       ];
 
-      const isStacked = style === "stacked";
-      const isGrouped = useGrouping;
+      const gridColor    = dark ? "#374151" : "#f1f5f9";
+      const tickColor    = dark ? "#9ca3af" : "#94a3b8";
+      const tooltipStyle = dark
+        ? { background: "#1f2937", border: "1px solid #374151", borderRadius: 8, fontSize: 12 }
+        : { borderRadius: 8, fontSize: 12, border: "1px solid #e2e8f0" };
 
-      // Empty state
-      if (!series.rows.length) {
-        return (
-          <Card className="p-4">
-            <div className="text-sm font-semibold text-slate-700 mb-3">Cost over time</div>
-            <div className="text-sm text-slate-400 text-center py-8">No data in selected range.</div>
-          </Card>
-        );
-      }
+      const visibleGroups = series.groupNames.filter(g => !hiddenSeries.has(g));
 
-      // Tooltip: order entries by value desc and add a Total row when grouped
+      const toggleSeries = (g) => {
+        setHiddenSeries(prev => {
+          const next = new Set(prev);
+          // Don't allow hiding all series
+          if (next.has(g)) { next.delete(g); }
+          else if (visibleGroups.length > 1) { next.add(g); }
+          return next;
+        });
+      };
+
       const customTooltip = ({ active, payload, label }) => {
         if (!active || !payload || !payload.length) return null;
-        const sorted = [...payload].filter(p => p.value > 0).sort((a, b) => b.value - a.value);
-        const total = sorted.reduce((s, p) => s + p.value, 0);
+        const actuals  = payload.filter(p => p.dataKey !== "forecast" && p.value != null && p.value > 0);
+        const fcst     = payload.find(p => p.dataKey === "forecast");
+        const total    = actuals.reduce((s, p) => s + p.value, 0);
         return (
-          <div className="bg-white border border-slate-200 rounded-lg shadow-md p-2.5 text-xs max-w-[260px]">
-            <div className="font-semibold text-slate-700 mb-1">{label}</div>
-            {isGrouped && (
+          <div className="bg-white dark:bg-gray-800 border border-slate-200 rounded-lg shadow-md p-2.5 text-xs max-w-[240px]"
+               style={tooltipStyle}>
+            <div className="font-semibold text-slate-700 mb-1" style={{ color: dark ? "#e5e7eb" : "#334155" }}>{label}</div>
+            {isGrouped && actuals.length > 1 && (
               <div className="flex justify-between gap-3 pb-1 mb-1 border-b border-slate-100">
-                <span className="text-slate-500">Total</span>
-                <span className="font-semibold text-slate-900 tabular-nums">{fmt(total, currency)}</span>
+                <span style={{ color: dark ? "#9ca3af" : "#64748b" }}>Total</span>
+                <span className="font-semibold tabular-nums" style={{ color: dark ? "#f3f4f6" : "#0f172a" }}>{fmt(total, currency)}</span>
               </div>
             )}
-            {sorted.map((p, i) => (
+            {actuals.sort((a, b) => b.value - a.value).map((p, i) => (
               <div key={i} className="flex justify-between gap-3 py-0.5">
                 <span className="flex items-center gap-1.5 truncate">
                   <span className="w-2 h-2 rounded-full flex-shrink-0" style={{ background: p.color }} />
-                  <span className="truncate text-slate-600">{p.dataKey === "total" ? "Cost" : p.dataKey}</span>
+                  <span style={{ color: dark ? "#d1d5db" : "#475569" }}>{p.dataKey === "total" ? "Cost" : p.dataKey}</span>
                 </span>
-                <span className="tabular-nums text-slate-900 font-medium flex-shrink-0">{fmt(p.value, currency)}</span>
+                <span className="tabular-nums font-medium" style={{ color: dark ? "#f3f4f6" : "#0f172a" }}>{fmt(p.value, currency)}</span>
               </div>
             ))}
+            {fcst && (
+              <div className="flex justify-between gap-3 py-0.5 border-t border-dashed border-slate-200 mt-1 pt-1">
+                <span style={{ color: dark ? "#9ca3af" : "#64748b" }}>Forecast</span>
+                <span className="tabular-nums" style={{ color: dark ? "#93c5fd" : "#3b82f6" }}>{fmt(fcst.value, currency)}/day</span>
+              </div>
+            )}
           </div>
         );
       };
 
-      const dark = useDark();
-      const gridColor = dark ? "#374151" : "#f1f5f9";
-      const tickColor = dark ? "#9ca3af" : "#94a3b8";
-      const tooltipStyle = dark ? { background: "#1f2937", border: "1px solid #374151", borderRadius: 8, fontSize: 12 }
-                                : { borderRadius: 8, fontSize: 12 };
-      const tsTitle = isGrouped ? `Cost by ${groupOpt.label.toLowerCase()}` : "Daily cost";
-      const tsBucketLabel = BUCKET_OPTS.find(b => b.id === bucket).label.toLowerCase();
+      // Custom dot to show alert markers on spike days
+      const AlertDot = ({ cx, cy, payload, dataKey }) => {
+        const dayAlerts = alertDays[payload.key];
+        if (!dayAlerts || !dayAlerts.length || dataKey !== (isGrouped ? visibleGroups[0] : "total")) return null;
+        const tier = dayAlerts[0].tier;
+        const color = tier === "critical" ? "#ef4444" : tier === "warning" ? "#f59e0b" : "#3b82f6";
+        return (
+          <g>
+            <circle cx={cx} cy={cy} r={5} fill={color} stroke="white" strokeWidth={1.5}
+              style={{ cursor: "pointer" }}
+              onClick={(e) => {
+                e.stopPropagation();
+                setAlertPanel(prev =>
+                  prev && prev.key === payload.key ? null : { key: payload.key, label: payload.label, alerts: dayAlerts, x: cx, y: cy }
+                );
+              }} />
+          </g>
+        );
+      };
+
+      if (!series.rows.length) {
+        return (
+          <Section title="Cost over time" storageKey="time-series">
+            <div className={cx("p-4 text-sm text-center", dark ? "bg-gray-800 text-gray-500" : "bg-white text-slate-400")}>No data in range.</div>
+          </Section>
+        );
+      }
+
+      const tsTitle = isGrouped ? `Cost by ${groupOpt.label.toLowerCase()}` : "Cost over time";
+      const tsBucketLabel = BUCKET_OPTS.find(b => b.id === bucket)?.label.toLowerCase() || bucket;
+      const dailyBudget = budget > 0 ? budget / 30 : null;
+      const isStacked = style === "stacked";
 
       return (
         <Section title={tsTitle} right={`(${tsBucketLabel})`} storageKey="time-series">
           <div className={cx("p-4", dark ? "bg-gray-800" : "bg-white")}>
-          {/* Controls row: bucket + style toggle */}
-          <div className="flex flex-wrap items-center gap-2 mb-3">
-            <div className="flex gap-1 bg-slate-100 rounded-md p-0.5">
-              {BUCKET_OPTS.map(b => (
-                <button key={b.id} onClick={() => setBucket(b.id)}
-                  className={cx("text-xs px-2.5 py-1 rounded font-medium transition-colors",
-                    bucket === b.id ? "bg-white text-slate-900 shadow-sm" : "text-slate-500 hover:text-slate-700")}>
-                  {b.label}
-                </button>
-              ))}
+            {/* Controls */}
+            <div className="flex flex-wrap items-center gap-2 mb-3">
+              <div className={cx("flex gap-0.5 rounded-md p-0.5 border", dark ? "bg-gray-700 border-gray-600" : "bg-slate-100 border-slate-200")}>
+                {BUCKET_OPTS.map(b => (
+                  <button key={b.id} onClick={() => setBucket(b.id)}
+                    className={cx("text-xs px-2.5 py-1 rounded font-medium transition-colors",
+                      bucket === b.id ? (dark ? "bg-gray-500 text-white" : "bg-white text-slate-900 shadow-sm")
+                                      : (dark ? "text-gray-400 hover:text-gray-200" : "text-slate-500 hover:text-slate-700"))}>
+                    {b.label}
+                  </button>
+                ))}
+              </div>
+              {isGrouped && (
+                <div className={cx("flex gap-0.5 rounded-md p-0.5 border", dark ? "bg-gray-700 border-gray-600" : "bg-slate-100 border-slate-200")}>
+                  {["stacked", "lines"].map(s => (
+                    <button key={s} onClick={() => setStyle(s)}
+                      className={cx("text-xs px-2.5 py-1 rounded font-medium transition-colors capitalize",
+                        style === s ? (dark ? "bg-gray-500 text-white" : "bg-white text-slate-900 shadow-sm")
+                                    : (dark ? "text-gray-400 hover:text-gray-200" : "text-slate-500 hover:text-slate-700"))}>
+                      {s}
+                    </button>
+                  ))}
+                </div>
+              )}
+              {Object.keys(alertDays).length > 0 && (
+                <span className={cx("text-xs flex items-center gap-1", dark ? "text-gray-500" : "text-slate-400")}>
+                  <span className="w-2 h-2 rounded-full bg-amber-400 inline-block" /> tap dots for alerts
+                </span>
+              )}
             </div>
+
+            {/* Chart */}
+            <div style={{ height: 260, position: "relative" }}>
+              <ResponsiveContainer width="100%" height="100%">
+                {(isGrouped && isStacked) ? (
+                  <AreaChart data={series.rows} margin={{ top: 5, right: 5, bottom: 0, left: -10 }}>
+                    <CartesianGrid strokeDasharray="3 3" stroke={gridColor} />
+                    <XAxis dataKey="label" tick={{ fontSize: 10, fill: tickColor }} interval="preserveStartEnd" />
+                    <YAxis tick={{ fontSize: 10, fill: tickColor }} tickFormatter={v => fmtCompact(v, currency)} width={55} />
+                    <Tooltip content={customTooltip} />
+                    {dailyBudget && (
+                      <Recharts.ReferenceLine y={dailyBudget} stroke="#ef4444" strokeDasharray="5 3"
+                        label={{ value: "Budget", fill: "#ef4444", fontSize: 10, position: "right" }} />
+                    )}
+                    {series.groupNames.filter(g => !hiddenSeries.has(g)).map((g, i) => (
+                      <Area key={g} type="monotone" dataKey={g} stackId="1"
+                        stroke={PALETTE[i % PALETTE.length]} fill={PALETTE[i % PALETTE.length]}
+                        fillOpacity={0.5} strokeWidth={1.5}
+                        dot={<AlertDot dataKey={g} />} />
+                    ))}
+                  </AreaChart>
+                ) : (
+                  <LineChart data={series.rows} margin={{ top: 5, right: 5, bottom: 0, left: -10 }}>
+                    <CartesianGrid strokeDasharray="3 3" stroke={gridColor} />
+                    <XAxis dataKey="label" tick={{ fontSize: 10, fill: tickColor }} interval="preserveStartEnd" />
+                    <YAxis tick={{ fontSize: 10, fill: tickColor }} tickFormatter={v => fmtCompact(v, currency)} width={55} />
+                    <Tooltip content={customTooltip} />
+                    {dailyBudget && (
+                      <Recharts.ReferenceLine y={dailyBudget} stroke="#ef4444" strokeDasharray="5 3"
+                        label={{ value: "Budget", fill: "#ef4444", fontSize: 10, position: "right" }} />
+                    )}
+                    {series.groupNames.filter(g => !hiddenSeries.has(g)).map((g, i) => (
+                      <Line key={g} type="monotone" dataKey={g}
+                        stroke={isGrouped ? PALETTE[i % PALETTE.length] : "#3b82f6"}
+                        strokeWidth={2} dot={<AlertDot dataKey={g} />} activeDot={{ r: 4 }}
+                        connectNulls={false} />
+                    ))}
+                    {/* Forecast dashed line — total for non-grouped, or "Other" total when grouped */}
+                    {series.rows.some(r => r.forecast != null) && (
+                      <Line type="monotone" dataKey="forecast"
+                        stroke={dark ? "#93c5fd" : "#3b82f6"} strokeWidth={1.5} strokeDasharray="6 3"
+                        dot={false} activeDot={false} connectNulls={true}
+                        legendType="none" />
+                    )}
+                  </LineChart>
+                )}
+              </ResponsiveContainer>
+
+              {/* Floating alert panel */}
+              {alertPanel && (
+                <div className={cx(
+                  "absolute z-10 rounded-xl border shadow-lg p-3 text-xs max-w-[220px]",
+                  dark ? "bg-gray-800 border-gray-600" : "bg-white border-slate-200"
+                )} style={{ top: Math.max(8, alertPanel.y - 80), left: Math.min(alertPanel.x - 10, 160) }}>
+                  <div className="flex items-center justify-between mb-2">
+                    <span className={cx("font-semibold", dark ? "text-gray-100" : "text-slate-800")}>{alertPanel.label}</span>
+                    <button onClick={() => setAlertPanel(null)}
+                      className={cx("text-xs", dark ? "text-gray-500 hover:text-gray-300" : "text-slate-400 hover:text-slate-600")}>✕</button>
+                  </div>
+                  {alertPanel.alerts.map((a, i) => {
+                    const tc = TIER_CONFIG[a.tier] || TIER_CONFIG.watch;
+                    return (
+                      <div key={i} className="py-1 border-t border-slate-100 first:border-0">
+                        <span className={cx("inline-block text-xs px-1.5 py-0.5 rounded-full font-bold mb-0.5", tc.badge)}>{tc.label}</span>
+                        <div className={cx("font-medium", dark ? "text-gray-200" : "text-slate-700")}>{a.resourceName}</div>
+                        <div className={cx(dark ? "text-gray-400" : "text-slate-500")}>{a.reason.slice(0, 80)}{a.reason.length > 80 ? "…" : ""}</div>
+                      </div>
+                    );
+                  })}
+                </div>
+              )}
+            </div>
+
+            {/* Custom legend with click-to-toggle */}
             {isGrouped && (
-              <div className="flex gap-1 bg-slate-100 rounded-md p-0.5">
-                <button onClick={() => setStyle("stacked")}
-                  className={cx("text-xs px-2.5 py-1 rounded font-medium transition-colors",
-                    style === "stacked" ? "bg-white text-slate-900 shadow-sm" : "text-slate-500 hover:text-slate-700")}>
-                  Stacked
-                </button>
-                <button onClick={() => setStyle("lines")}
-                  className={cx("text-xs px-2.5 py-1 rounded font-medium transition-colors",
-                    style === "lines" ? "bg-white text-slate-900 shadow-sm" : "text-slate-500 hover:text-slate-700")}>
-                  Lines
-                </button>
+              <div className={cx("flex flex-wrap gap-x-3 gap-y-1.5 mt-3 pt-3 border-t",
+                dark ? "border-gray-700" : "border-slate-100")}>
+                {series.groupNames.map((g, i) => {
+                  const hidden = hiddenSeries.has(g);
+                  return (
+                    <button key={g} onClick={() => toggleSeries(g)}
+                      className={cx("flex items-center gap-1.5 text-xs transition-opacity",
+                        hidden ? "opacity-35" : "opacity-100",
+                        dark ? "text-gray-400 hover:text-gray-200" : "text-slate-600 hover:text-slate-900")}>
+                      <span className="w-2.5 h-2.5 rounded-sm flex-shrink-0 transition-opacity"
+                        style={{ background: hidden ? (dark ? "#4b5563" : "#cbd5e1") : PALETTE[i % PALETTE.length] }} />
+                      <span className="truncate max-w-[100px]" title={g}>{g}</span>
+                    </button>
+                  );
+                })}
+                {hiddenSeries.size > 0 && (
+                  <button onClick={() => setHiddenSeries(new Set())}
+                    className={cx("text-xs underline", dark ? "text-gray-500" : "text-slate-400")}>
+                    show all
+                  </button>
+                )}
               </div>
             )}
-          </div>
-
-          <div style={{ height: 260 }}>
-            <ResponsiveContainer width="100%" height="100%">
-              {(isGrouped && isStacked) ? (
-                <AreaChart data={series.rows} margin={{ top: 5, right: 5, bottom: 0, left: -10 }}>
-                  <CartesianGrid strokeDasharray="3 3" stroke={gridColor} />
-                  <XAxis dataKey="label" tick={{ fontSize: 10, fill: tickColor }} interval="preserveStartEnd" />
-                  <YAxis tick={{ fontSize: 10, fill: tickColor }} tickFormatter={v => fmtCompact(v, currency)} width={55} />
-                  <Tooltip content={customTooltip} />
-                  {series.groupNames.map((g, i) => (
-                    <Area key={g} type="monotone" dataKey={g} stackId="1"
-                      stroke={PALETTE[i % PALETTE.length]} fill={PALETTE[i % PALETTE.length]} fillOpacity={0.5} strokeWidth={1.5} />
-                  ))}
-                </AreaChart>
-              ) : (
-                <LineChart data={series.rows} margin={{ top: 5, right: 5, bottom: 0, left: -10 }}>
-                  <CartesianGrid strokeDasharray="3 3" stroke={gridColor} />
-                  <XAxis dataKey="label" tick={{ fontSize: 10, fill: tickColor }} interval="preserveStartEnd" />
-                  <YAxis tick={{ fontSize: 10, fill: tickColor }} tickFormatter={v => fmtCompact(v, currency)} width={55} />
-                  <Tooltip content={customTooltip} />
-                  {series.groupNames.map((g, i) => (
-                    <Line key={g} type="monotone" dataKey={g}
-                      stroke={isGrouped ? PALETTE[i % PALETTE.length] : "#3b82f6"}
-                      strokeWidth={2} dot={false} activeDot={{ r: 4 }} />
-                  ))}
-                </LineChart>
-              )}
-            </ResponsiveContainer>
-          </div>
-
-          {/* Custom legend below the chart, only when grouped */}
-          {isGrouped && (
-            <div className={cx("flex flex-wrap gap-x-3 gap-y-1.5 mt-3 pt-3 border-t", dark ? "border-gray-700" : "border-slate-100")}>
-              {series.groupNames.map((g, i) => (
-                <div key={g} className={cx("flex items-center gap-1.5 text-xs max-w-full", dark ? "text-gray-400" : "text-slate-600")}>
-                  <span className="w-2.5 h-2.5 rounded-sm flex-shrink-0" style={{ background: PALETTE[i % PALETTE.length] }} />
-                  <span className="truncate" title={g}>{g}</span>
-                </div>
-              ))}
-            </div>
-          )}
           </div>
         </Section>
       );
@@ -1780,6 +1999,14 @@
               <option value="critical">Critical</option>
             </select>
           </div>
+          {values.monthlyBudget !== undefined && (
+            <div className="col-span-2">
+              <label className={lbl}>Overall monthly budget ({currency}) — shown as progress bar on dashboard</label>
+              <input type="number" min="0" step="10" value={values.monthlyBudget ?? ""}
+                onChange={e => onChange({ ...values, monthlyBudget: parseFloat(e.target.value) || 0 })}
+                className={inp} placeholder="e.g. 200" />
+            </div>
+          )}
         </div>
       );
     }
@@ -2216,6 +2443,53 @@
       );
     }
 
+    // Compact budget progress bar
+    function BudgetBar({ mtd, projected, budget, currency, dark, onSetBudget }) {
+      const muted0 = dark ? "text-gray-500" : "text-slate-400";
+      if (!budget || budget <= 0) {
+        return (
+          <button onClick={onSetBudget}
+            className={cx("w-full text-xs px-4 py-2 rounded-xl border border-dashed transition-colors text-left",
+              dark ? "border-gray-700 text-gray-600 hover:border-gray-500 hover:text-gray-400"
+                   : "border-slate-200 text-slate-400 hover:border-slate-300 hover:text-slate-500")}>
+            + Set a monthly budget to track spend against it
+          </button>
+        );
+      }
+      const pct = Math.min((mtd / budget) * 100, 100);
+      const projPct = Math.min((projected / budget) * 100, 110);
+      const overBudget = projected > budget;
+      const barColor = pct < 70 ? "#22c55e" : pct < 90 ? "#f59e0b" : "#ef4444";
+      const bg = dark ? "bg-gray-800 border-gray-700" : "bg-white border-slate-200";
+      const muted = dark ? "text-gray-500" : "text-slate-400";
+      const text  = dark ? "text-gray-200" : "text-slate-700";
+      return (
+        <div className={cx("rounded-xl border shadow-sm px-4 py-2.5", bg)}>
+          <div className="flex items-center justify-between mb-1.5 gap-2">
+            <span className={cx("text-xs font-medium", text)}>Monthly budget</span>
+            <span className={cx("text-xs tabular-nums", overBudget ? "text-rose-500 font-semibold" : muted)}>
+              {fmt(mtd, currency)} <span className={muted}>of</span> {fmt(budget, currency)}
+              {projected > mtd && <span className={muted}> · forecast {fmt(projected, currency)}</span>}
+            </span>
+          </div>
+          {/* Track */}
+          <div className={cx("relative h-1.5 rounded-full overflow-visible", dark ? "bg-gray-700" : "bg-slate-100")}>
+            {/* Actual spend */}
+            <div className="absolute top-0 left-0 h-full rounded-full transition-all duration-500"
+              style={{ width: `${pct}%`, background: barColor }} />
+            {/* Forecast marker (dashed line at projected %) */}
+            {projected > mtd && projPct <= 110 && (
+              <div className="absolute top-1/2 -translate-y-1/2 w-0.5 h-3 rounded-full bg-blue-400 opacity-70"
+                style={{ left: `${Math.min(projPct, 100)}%` }} title={`Forecast: ${fmt(projected, currency)}`} />
+            )}
+          </div>
+          {overBudget && (
+            <div className="text-xs text-rose-500 mt-1 font-medium">Over budget by {fmt(projected - budget, currency)}</div>
+          )}
+        </div>
+      );
+    }
+
     // =========================================================================
     // DASHBOARD (Pass 2+3: tabs, insight cards, alerts tab)
     // =========================================================================
@@ -2298,6 +2572,9 @@
       }, [data, metricsData, days]);
 
       const forecast = useMemo(() => data ? projectMonthEnd(data.records, data.currency) : null, [data]);
+      // Re-read monthly budget reactively (re-evaluates when alerts change since
+      // threshold saves trigger a re-run of runIntelligence).
+      const monthlyBudget = useMemo(() => ensureGlobalThreshold().monthlyBudget || 0, [alerts]);
 
       // Dark mode class helpers
       const bg     = dark ? "bg-gray-900"  : "bg-slate-50";
@@ -2441,6 +2718,18 @@
                       />
                     </div>
 
+                    {/* Budget progress bar */}
+                    {forecast && (
+                      <BudgetBar
+                        mtd={forecast.mtd}
+                        projected={forecast.projected}
+                        budget={monthlyBudget}
+                        currency={data.currency}
+                        dark={dark}
+                        onSetBudget={() => setActiveTab("alerts")}
+                      />
+                    )}
+
                     {/* Insight cards */}
                     {alerts.length > 0 && <InsightCards alerts={alerts} dark={dark} />}
 
@@ -2450,6 +2739,9 @@
                       from={data.from} to={data.to} days={days}
                       groupOpt={groupOpt} bucket={bucket} setBucket={setBucket}
                       style={style} setStyle={setStyle}
+                      forecast={forecast}
+                      alerts={alerts}
+                      budget={monthlyBudget}
                     />
                     <MoversCard records={data.records} days={days} currency={data.currency} groupOpt={groupOpt} />
                     <GroupChart records={data.records} currency={data.currency} groupOpt={groupOpt} />
