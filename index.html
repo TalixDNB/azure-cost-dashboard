@@ -94,107 +94,45 @@
     const CACHE_TTL_MS = 6 * 60 * 60 * 1000;
 
     // =========================================================================
-    // TEST DATA — enriched synthetic dataset designed to trigger all alert types
+    // TEST DATA — rich synthetic dataset covering all dimensions
     // =========================================================================
     function generateTestData(days) {
-      // Each resource is designed to exercise a specific signal:
-      // asp-prod-plan  → steady growth + forecast breach + new top driver
-      // sql-prod-db    → sudden cost spike (unusual jump, high confidence)
-      // vm-dev-build   → idle VM (low CPU in metrics, non-trivial cost)
-      // vm-idle-extra  → idle VM (second VM, confirms pattern)
-      // stg-prod-assets→ flat/stable, no signals (noise suppression check)
-      // app-api-prod   → moderate growth, Watch tier
-      // cog-search-prod→ new resource (grace period check, appears day 20+)
-      // stg-staging    → falling cost, decreased mover
-      // vnet-prod      → tiny cost, below noise floor
       const RESOURCES = [
-        { name: "asp-prod-plan",    service: "Microsoft.Web",               rg: "rg-prod",    location: "australiaeast",  baseCost: 4.5,  signal: "growth"   },
-        { name: "sql-prod-db",      service: "Microsoft.Sql",               rg: "rg-prod",    location: "australiaeast",  baseCost: 2.2,  signal: "spike"    },
-        { name: "vm-dev-build",     service: "Microsoft.Compute",           rg: "rg-dev",     location: "southeastasia",  baseCost: 3.5,  signal: "idle"     },
-        { name: "vm-idle-extra",    service: "Microsoft.Compute",           rg: "rg-dev",     location: "southeastasia",  baseCost: 2.1,  signal: "idle"     },
-        { name: "stg-prod-assets",  service: "Microsoft.Storage",           rg: "rg-prod",    location: "australiaeast",  baseCost: 0.45, signal: "stable"   },
-        { name: "app-api-prod",     service: "Microsoft.Web",               rg: "rg-prod",    location: "australiaeast",  baseCost: 1.1,  signal: "moderate" },
-        { name: "stg-staging-data", service: "Microsoft.Storage",           rg: "rg-staging", location: "australiasouth", baseCost: 1.8,  signal: "falling"  },
-        { name: "vnet-prod",        service: "Microsoft.Network",           rg: "rg-shared",  location: "australiaeast",  baseCost: 0.04, signal: "noise"    },
+        { name: "asp-prod-plan",       service: "Microsoft.Web",               rg: "rg-prod",    location: "australiaeast",  baseCost: 5.0  },
+        { name: "app-api-prod",        service: "Microsoft.Web",               rg: "rg-prod",    location: "australiaeast",  baseCost: 1.2  },
+        { name: "stg-prod-assets",     service: "Microsoft.Storage",           rg: "rg-prod",    location: "australiaeast",  baseCost: 0.4  },
+        { name: "stg-staging-data",    service: "Microsoft.Storage",           rg: "rg-staging", location: "australiasouth", baseCost: 0.1  },
+        { name: "sql-prod-db",         service: "Microsoft.Sql",               rg: "rg-prod",    location: "australiaeast",  baseCost: 2.8  },
+        { name: "vm-dev-build",        service: "Microsoft.Compute",           rg: "rg-dev",     location: "southeastasia",  baseCost: 0.9  },
+        { name: "cog-search-prod",     service: "Microsoft.CognitiveServices", rg: "rg-shared",  location: "australiaeast",  baseCost: 0.3  },
+        { name: "vnet-prod",           service: "Microsoft.Network",           rg: "rg-shared",  location: "australiaeast",  baseCost: 0.05 },
       ];
-
-      // cog-search-prod is a "new" resource — only appears in last 3 days
-      const NEW_RESOURCE = {
-        name: "cog-search-prod", service: "Microsoft.CognitiveServices",
-        rg: "rg-shared", location: "australiaeast", baseCost: 8.0, signal: "new"
-      };
-
       const seed = (x) => Math.abs(Math.sin(x * 127.1 + 311.7));
       const today = new Date();
       const records = [];
-
       for (let d = days - 1; d >= 0; d--) {
         const dt = new Date(today);
         dt.setUTCDate(dt.getUTCDate() - d);
         const iso = dt.toISOString().slice(0, 10);
-        const dayIndex = days - 1 - d;   // 0 = oldest day, days-1 = today
-        const daysAgo  = d;               // days ago from today
-        const dow = dt.getUTCDay();
-        const weekend = (dow === 0 || dow === 6) ? 0.75 : 1.0;
-
+        const dayIndex = days - 1 - d;
+        const progress = dayIndex / days;
         for (const res of RESOURCES) {
-          const i = RESOURCES.indexOf(res);
-          const noise = 0.88 + seed(dayIndex * 17 + i * 31) * 0.24;
-          let cost = res.baseCost * weekend * noise;
-
-          if (res.signal === "growth") {
-            // Steady upward trend: doubles over the range
-            const progress = dayIndex / Math.max(days - 1, 1);
-            cost *= (1 + progress * 1.0);
-          } else if (res.signal === "spike") {
-            // Normal until last 8 days, then 4× spike — high-confidence unusual jump
-            if (daysAgo <= 8) cost *= 4.2;
-          } else if (res.signal === "idle") {
-            // Constant cost (VM running but doing nothing)
-            cost = res.baseCost * (0.95 + seed(dayIndex * 7 + i) * 0.1);
-          } else if (res.signal === "moderate") {
-            const progress = dayIndex / Math.max(days - 1, 1);
-            cost *= (1 + progress * 0.35);
-          } else if (res.signal === "falling") {
-            const progress = dayIndex / Math.max(days - 1, 1);
-            cost *= (1 - progress * 0.55);
-          }
-          // stable and noise: no modification
-
+          const trend    = res.rg === "rg-prod" ? 1 + progress * 0.4 : res.rg === "rg-dev" ? 1 - progress * 0.2 : 1;
+          const dow      = dt.getUTCDay();
+          const seasonal = (dow === 0 || dow === 6) ? 0.7 : 1.0;
+          const spike    = (res.name === "asp-prod-plan" && dayIndex > days * 0.55 && dayIndex < days * 0.85) ? 2.2 : 1.0;
+          const noise    = 0.85 + seed(dayIndex * 13 + RESOURCES.indexOf(res)) * 0.3;
           records.push({
-            date: iso, cost: parseFloat(Math.max(0, cost).toFixed(4)),
+            date: iso, cost: parseFloat((res.baseCost * trend * seasonal * spike * noise).toFixed(4)),
             currency: "AUD", service: res.service, resourceGroup: res.rg,
-            resourceName: res.name, location: res.location, subName: "Test Subscription",
-            resourceId: `/subscriptions/test-sub/resourceGroups/${res.rg}/providers/${res.service}/${res.name}`
-          });
-        }
-
-        // New resource: only last 3 days (grace period test)
-        if (daysAgo <= 2) {
-          const noise = 0.9 + seed(dayIndex * 3) * 0.2;
-          records.push({
-            date: iso, cost: parseFloat((NEW_RESOURCE.baseCost * noise).toFixed(4)),
-            currency: "AUD", service: NEW_RESOURCE.service, resourceGroup: NEW_RESOURCE.rg,
-            resourceName: NEW_RESOURCE.name, location: NEW_RESOURCE.location,
-            subName: "Test Subscription",
-            resourceId: `/subscriptions/test-sub/resourceGroups/${NEW_RESOURCE.rg}/providers/${NEW_RESOURCE.service}/${NEW_RESOURCE.name}`
+            resourceName: res.name, location: res.location, subName: "Test Subscription"
           });
         }
       }
-
-      // Synthetic Monitor Metrics for VMs (simulates what the real API would return)
-      // vm-dev-build and vm-idle-extra: near-zero CPU = idle
-      const testMetrics = {
-        "vm-dev-build":  { avgCpu7d: 1.2, maxCpu7d: 3.1,  avgNetwork7d: 0.8  },
-        "vm-idle-extra": { avgCpu7d: 0.8, maxCpu7d: 2.4,  avgNetwork7d: 0.3  },
-        "asp-prod-plan": { avgCpu7d: 42.1, maxCpu7d: 78.3, avgNetwork7d: 180.2 },
-      };
-
       const from = new Date(today); from.setUTCDate(from.getUTCDate() - days);
       return {
         currency: "AUD", fetchedAt: Date.now(), isTest: true, fromCache: false, days,
-        from: from.toISOString().slice(0, 10), to: today.toISOString().slice(0, 10),
-        records, metrics: testMetrics
+        from: from.toISOString().slice(0, 10), to: today.toISOString().slice(0, 10), records
       };
     }
 
@@ -308,51 +246,6 @@
       return (j.value || [])
         .map(s => ({ id: s.subscriptionId, name: s.displayName, state: s.state }))
         .sort((a, b) => a.name.localeCompare(b.name));
-    }
-
-    // Fetch CPU + network metrics for a VM resource over the last 7 days.
-    // resourceId: full ARM path e.g. /subscriptions/.../providers/Microsoft.Compute/virtualMachines/name
-    async function fetchVmMetrics(resourceId, at) {
-      const to   = new Date().toISOString();
-      const from = new Date(Date.now() - 7 * 86400000).toISOString();
-      const url  = `${resourceId}/providers/microsoft.insights/metrics`
-                 + `?api-version=2018-01-01`
-                 + `&metricnames=${encodeURIComponent("Percentage CPU,Network In Total,Network Out Total")}`
-                 + `&timespan=${encodeURIComponent(from + "/" + to)}`
-                 + `&interval=P1D`
-                 + `&aggregation=Average`;
-      try {
-        const j = await armGet(url, at);
-        const getAvg = (metricName) => {
-          const m = (j.value || []).find(v => v.name?.value === metricName);
-          if (!m || !m.timeseries?.[0]?.data?.length) return null;
-          const vals = m.timeseries[0].data.map(d => d.average).filter(v => v != null);
-          return vals.length ? vals.reduce((s, v) => s + v, 0) / vals.length : null;
-        };
-        return {
-          avgCpu7d:     getAvg("Percentage CPU")   ?? 0,
-          avgNetwork7d: (getAvg("Network In Total") ?? 0) + (getAvg("Network Out Total") ?? 0)
-        };
-      } catch { return null; }
-    }
-
-    // Fetch metrics for all VMs found in records. Returns { [resourceName]: metrics }.
-    async function fetchAllVmMetrics(records, at, onProgress) {
-      const vms = {};
-      for (const r of records) {
-        if (r.service === "Microsoft.Compute" && r.resourceId && !vms[r.resourceName]) {
-          vms[r.resourceName] = r.resourceId;
-        }
-      }
-      const result = {};
-      const names = Object.keys(vms);
-      for (let i = 0; i < names.length; i++) {
-        const name = names[i];
-        if (onProgress) onProgress(`Fetching metrics: ${name} (${i+1}/${names.length})…`);
-        const m = await fetchVmMetrics(vms[name], at);
-        if (m) result[name] = m;
-      }
-      return result;
     }
 
     async function fetchUsageDetails(subId, from, to, at, onProgress) {
@@ -473,58 +366,6 @@
       } catch { return fmt(n, currency); }
     }
 
-    // Compact KPI formatter — narrow symbol + 1 decimal, no currency code repetition
-    function fmtKpi(n, currency) {
-      if (n == null || isNaN(n)) return "—";
-      try {
-        const sym = new Intl.NumberFormat("en", {
-          style: "currency", currency, currencyDisplay: "narrowSymbol", maximumFractionDigits: 0
-        }).format(0).replace(/[\d,.\s]/g,"").trim() || "";
-        const abs = Math.abs(n);
-        const pre = n < 0 ? "-" : "";
-        if (abs >= 10000) return `${pre}${sym}${Math.round(abs/1000)}k`;
-        if (abs >= 1000)  return `${pre}${sym}${(abs/1000).toFixed(1)}k`;
-        if (abs >= 100)   return `${pre}${sym}${Math.round(abs)}`;
-        return `${pre}${sym}${abs.toFixed(1)}`;
-      } catch { return n.toFixed(1); }
-    }
-
-    // Auto-set per-resource absoluteMonthly budget at 115% of current monthly average.
-    // Only overwrites existing entries if force=true.
-    function initializeResourceBudgets(records, force) {
-      const byResource = {};
-      for (const r of records) {
-        if (!byResource[r.resourceName]) byResource[r.resourceName] = { cost: 0, days: new Set() };
-        byResource[r.resourceName].cost += r.cost;
-        byResource[r.resourceName].days.add(r.date);
-      }
-      const g = ensureGlobalThreshold();
-      let count = 0;
-      for (const [name, data] of Object.entries(byResource)) {
-        const key = `thresholds:resource:${name}`;
-        if (!force && kv.get(key)) continue;
-        const dailyAvg = data.cost / Math.max(data.days.size, 1);
-        const budget   = Math.max(parseFloat((dailyAvg * 30 * 1.15).toFixed(2)), 0.50);
-        kv.set(key, { absoluteMonthly: budget, momPct: g.momPct,
-          tierAbsolute: g.tierAbsolute, tierPct: g.tierPct, enabled: true, _auto: true });
-        count++;
-      }
-      return count;
-    }
-
-    // Total budget = sum of all per-resource absoluteMonthly thresholds.
-    // Falls back to globalDefault for resources without a specific override.
-    function computeTotalBudget(records) {
-      const resources = new Set(records.map(r => r.resourceName));
-      const globalDefault = ensureGlobalThreshold().absoluteMonthly || 50;
-      let total = 0;
-      for (const name of resources) {
-        const raw = kv.get(`thresholds:resource:${name}`);
-        total += raw ? (JSON.parse(raw).absoluteMonthly || 0) : globalDefault;
-      }
-      return parseFloat(total.toFixed(2));
-    }
-
     function groupSum(records, keyFn) {
       const map = {};
       for (const r of records) {
@@ -577,30 +418,24 @@
     }
 
     // Build a flat (single-series) time series for the chosen bucket, no grouping.
-    function buildTimeSeries(records, from, to, bucket, forecastPoints) {
+    function buildTimeSeries(records, from, to, bucket) {
+      // Sum costs by bucket key
       const sums = {};
+      const labelByKey = {};
       for (const r of records) {
         if (!r.date) continue;
         const { key, label } = bucketDate(r.date, bucket);
         sums[key] = (sums[key] || 0) + r.cost;
+        labelByKey[key] = label;
       }
+      // Fill all buckets in range so the chart has continuous x-axis
       const keysSeen = new Set();
       const out = [];
       for (const iso of iterDays(from, to)) {
         const { key, label } = bucketDate(iso, bucket);
         if (keysSeen.has(key)) continue;
         keysSeen.add(key);
-        out.push({ key, label, total: sums[key] || 0, forecast: null });
-      }
-      // Append forecast extension (only in daily bucket to keep chart clean)
-      if (forecastPoints && bucket === "day") {
-        // Anchor: set last actual point also as forecast start for smooth join
-        if (out.length > 0) out[out.length - 1].forecast = out[out.length - 1].total;
-        for (const fp of forecastPoints) {
-          if (keysSeen.has(fp.key)) continue;
-          keysSeen.add(fp.key);
-          out.push({ key: fp.key, label: fp.label, total: null, forecast: fp.forecast });
-        }
+        out.push({ key, label, total: sums[key] || 0 });
       }
       out.sort((a, b) => a.key.localeCompare(b.key));
       return out;
@@ -689,526 +524,6 @@
         increasing: movers.filter(m => m.delta > 0).sort((a, b) => b.delta - a.delta).slice(0, 5),
         decreasing: movers.filter(m => m.delta < 0).sort((a, b) => a.delta - b.delta).slice(0, 5)
       };
-    }
-
-    // =========================================================================
-    // THRESHOLD SYSTEM
-    // =========================================================================
-
-    const THRESHOLD_DEFAULTS = {
-      absoluteMonthly: 50,
-      momPct: 25,
-      popPct: 50,
-      tierAbsolute: "warning",
-      tierPct: "watch",
-      enabled: true
-    };
-
-    // Ensure global defaults exist in localStorage on first use.
-    // Always merges with THRESHOLD_DEFAULTS so new fields appear for existing users.
-    function ensureGlobalThreshold() {
-      const raw = kv.get("thresholds:global");
-      if (!raw) {
-        kv.set("thresholds:global", THRESHOLD_DEFAULTS);
-        return { ...THRESHOLD_DEFAULTS };
-      }
-      const stored = JSON.parse(raw);
-      // Merge: defaults fill in any keys missing from older stored versions
-      const merged = { ...THRESHOLD_DEFAULTS, ...stored };
-      // If we added new keys, persist the merged version
-      if (Object.keys(merged).length !== Object.keys(stored).length) {
-        kv.set("thresholds:global", merged);
-      }
-      return merged;
-    }
-
-    // Resolve the effective threshold for a resource using the cascade:
-    // resource → rg → location → service → global
-    function resolveThreshold(resourceName, service, rg, location) {
-      const keys = [
-        `thresholds:resource:${resourceName}`,
-        `thresholds:rg:${rg}`,
-        `thresholds:location:${location}`,
-        `thresholds:service:${service}`,
-        "thresholds:global"
-      ];
-      for (const k of keys) {
-        const raw = kv.get(k);
-        if (raw) {
-          const t = JSON.parse(raw);
-          if (t.enabled !== false) return { ...t, _key: k };
-        }
-      }
-      return { ...THRESHOLD_DEFAULTS, _key: "thresholds:global" };
-    }
-
-    // Returns true if a non-global override exists for this resource.
-    function hasOverride(resourceName, service, rg, location) {
-      const keys = [
-        `thresholds:resource:${resourceName}`,
-        `thresholds:rg:${rg}`,
-        `thresholds:location:${location}`,
-        `thresholds:service:${service}`
-      ];
-      return keys.some(k => kv.get(k) !== null);
-    }
-
-    // List all active overrides across all scopes.
-    function listOverrides() {
-      const overrides = [];
-      try {
-        for (let i = 0; i < localStorage.length; i++) {
-          const k = localStorage.key(i);
-          if (!k || !k.startsWith("thresholds:") || k === "thresholds:global") continue;
-          const raw = kv.get(k);
-          if (raw) overrides.push({ key: k, ...JSON.parse(raw) });
-        }
-      } catch {}
-      return overrides;
-    }
-
-    // =========================================================================
-    // INTELLIGENCE ENGINE
-    // =========================================================================
-
-    const TIER_ORDER = { none: 0, watch: 1, warning: 2, critical: 3 };
-
-    // Compute mean and stddev of an array of numbers.
-    function stats1d(arr) {
-      if (!arr.length) return { mean: 0, std: 0 };
-      const mean = arr.reduce((s, v) => s + v, 0) / arr.length;
-      const std  = Math.sqrt(arr.reduce((s, v) => s + (v - mean) ** 2, 0) / arr.length);
-      return { mean, std };
-    }
-
-    // Simple linear regression slope (cost per day trend).
-    function linRegSlope(vals) {
-      const n = vals.length;
-      if (n < 2) return 0;
-      const xMean = (n - 1) / 2;
-      const yMean = vals.reduce((s, v) => s + v, 0) / n;
-      let num = 0, den = 0;
-      for (let i = 0; i < n; i++) {
-        num += (i - xMean) * (vals[i] - yMean);
-        den += (i - xMean) ** 2;
-      }
-      return den === 0 ? 0 : num / den;
-    }
-
-    // Project month-end spend from records.
-    // Compute a smart daily rate that handles sudden resource shutoffs and spikes.
-    function computeSmartDailyRate(dailyCosts) {
-      // dailyCosts: array of numbers (oldest → newest), one per day
-      if (!dailyCosts.length) return 0;
-      if (dailyCosts.length === 1) return dailyCosts[0];
-
-      const last3  = dailyCosts.slice(-3);
-      const last7  = dailyCosts.slice(-7);
-      const prior  = dailyCosts.slice(0, -7);
-
-      const avg = arr => arr.length ? arr.reduce((s, v) => s + v, 0) / arr.length : 0;
-      const last3Avg  = avg(last3);
-      const last7Avg  = avg(last7);
-      const priorAvg  = avg(prior);
-
-      // ① Turnoff detection: last 3 days < 5% of prior average → resource off
-      if (priorAvg > 0.5 && last3Avg < priorAvg * 0.05) {
-        return last3Avg; // near-zero
-      }
-
-      // ② Spike suppression: last 3 days > 5× prior → likely one-off spike
-      // Use last 7 avg instead to avoid inflating forecast
-      if (priorAvg > 0.5 && last3Avg > priorAvg * 5) {
-        return last7Avg;
-      }
-
-      // ③ Sharp drop (not zero): last 3 days < 40% of prior → use recent rate only
-      if (priorAvg > 0.5 && last3Avg < priorAvg * 0.40) {
-        return last7Avg;
-      }
-
-      // ④ Normal case: weighted blend (recent 2×, prior 1×)
-      if (prior.length >= 3) {
-        return (last7Avg * 2 + priorAvg) / 3;
-      }
-      return last7Avg;
-    }
-
-    function projectMonthEnd(records, currency) {
-      const now   = new Date();
-      const daysInMonth = new Date(now.getUTCFullYear(), now.getUTCMonth() + 1, 0).getDate();
-      const daysLeft = daysInMonth - now.getUTCDate();
-
-      // Build daily cost map
-      const byDate = {};
-      for (const r of records) byDate[r.date] = (byDate[r.date] || 0) + r.cost;
-
-      // Build sorted daily array from all data
-      const sortedDates = Object.keys(byDate).sort();
-      const dailyCosts  = sortedDates.map(d => byDate[d]);
-
-      const dailyRate = computeSmartDailyRate(dailyCosts);
-
-      // Month-to-date spend
-      const monthStart = new Date(now.getUTCFullYear(), now.getUTCMonth(), 1).toISOString().slice(0, 10);
-      const mtd = records.filter(r => r.date >= monthStart).reduce((s, r) => s + r.cost, 0);
-
-      // Build per-day forecast points for chart extension (today+1 → end of month)
-      const forecastPoints = [];
-      for (let d = 1; d <= daysLeft; d++) {
-        const dt = new Date(now);
-        dt.setUTCDate(dt.getUTCDate() + d);
-        forecastPoints.push({
-          key:      dt.toISOString().slice(0, 10),
-          label:    dt.toISOString().slice(5, 10),
-          forecast: parseFloat((dailyRate).toFixed(4))
-        });
-      }
-
-      return {
-        mtd,
-        projected: mtd + dailyRate * daysLeft,
-        dailyRate,
-        daysLeft,
-        daysInMonth,
-        currency,
-        forecastPoints  // for chart extension
-      };
-    }
-
-    // Compute alert "peak days" for chart markers.
-    // Returns { [isoDate]: [alert] } for dates where signals peaked.
-    function computeAlertDays(alerts, records, days) {
-      const result = {};
-      const byResource = {};
-      for (const r of records) {
-        if (!byResource[r.resourceName]) byResource[r.resourceName] = {};
-        byResource[r.resourceName][r.date] = (byResource[r.resourceName][r.date] || 0) + r.cost;
-      }
-
-      for (const alert of alerts) {
-        const recs = byResource[alert.resourceName];
-        if (!recs) continue;
-        const hasSpikeSignal = alert.triggers.some(t =>
-          t.type === "unusual_jump" || t.type === "threshold_absolute" || t.type === "forecast_breach"
-        );
-        if (!hasSpikeSignal) continue;
-
-        // Find the peak day in last 14 days for this resource
-        const cutoff = new Date(); cutoff.setUTCDate(cutoff.getUTCDate() - 14);
-        const cutoffIso = cutoff.toISOString().slice(0, 10);
-        let peakDate = null, peakCost = 0;
-        for (const [date, cost] of Object.entries(recs)) {
-          if (date >= cutoffIso && cost > peakCost) { peakCost = cost; peakDate = date; }
-        }
-        if (peakDate) {
-          if (!result[peakDate]) result[peakDate] = [];
-          result[peakDate].push(alert);
-        }
-      }
-      return result;
-    }
-
-    // Core intelligence function.
-    // records: flat array of normalised cost records (all resources, all days)
-    // thresholds: not needed directly — we call resolveThreshold per resource
-    // metricsData: { [resourceName]: { avgCpu7d, maxCpu7d, avgNetwork7d } }
-    // Returns: array of alert objects sorted by tier desc, then impact desc.
-    function runIntelligence(records, metricsData, days) {
-      if (!records || records.length === 0) return [];
-
-      // Group records by resource
-      const byResource = {};
-      for (const r of records) {
-        const k = r.resourceName || "—";
-        if (!byResource[k]) byResource[k] = [];
-        byResource[k].push(r);
-      }
-
-      // Determine total cost per resource across full range for rank tracking
-      const resourceTotals = {};
-      for (const [name, recs] of Object.entries(byResource)) {
-        resourceTotals[name] = recs.reduce((s, r) => s + r.cost, 0);
-      }
-      const rankedResources = Object.entries(resourceTotals)
-        .sort((a, b) => b[1] - a[1])
-        .map(([name]) => name);
-
-      // Prior-period ranking (first half of range)
-      const cutoff = new Date();
-      cutoff.setUTCDate(cutoff.getUTCDate() - Math.floor(days / 2));
-      const cutoffIso = cutoff.toISOString().slice(0, 10);
-      const priorTotals = {};
-      for (const r of records) {
-        if (r.date < cutoffIso) priorTotals[r.resourceName] = (priorTotals[r.resourceName] || 0) + r.cost;
-      }
-      const priorRanked = Object.entries(priorTotals)
-        .sort((a, b) => b[1] - a[1])
-        .map(([name]) => name);
-
-      // Grace period: resources that first appear within last 48h
-      const firstSeen = {};
-      for (const r of records) {
-        if (!firstSeen[r.resourceName] || r.date < firstSeen[r.resourceName]) {
-          firstSeen[r.resourceName] = r.date;
-        }
-      }
-      const twoDaysAgo = new Date();
-      twoDaysAgo.setUTCDate(twoDaysAgo.getUTCDate() - 2);
-      const twoDaysAgoIso = twoDaysAgo.toISOString().slice(0, 10);
-      const inGracePeriod = (name) => firstSeen[name] >= twoDaysAgoIso;
-
-      // Top 1% threshold for grace period bypass
-      const allTotals = Object.values(resourceTotals).sort((a, b) => b - a);
-      const top1pctCost = allTotals[Math.max(0, Math.floor(allTotals.length * 0.01))] || Infinity;
-
-      const alerts = [];
-
-      for (const [resourceName, recs] of Object.entries(byResource)) {
-        const meta = recs[0]; // service, rg, location all same per resource
-        const threshold = resolveThreshold(
-          resourceName, meta.service, meta.resourceGroup, meta.location
-        );
-        const totalCost = resourceTotals[resourceName];
-        const currency  = meta.currency || "AUD";
-
-        const triggers   = [];  // { type, detail, confidenceAdd }
-        let confidence   = 0;
-        let tier         = "none";
-
-        // Daily cost series for this resource
-        const dailyCosts = {};
-        for (const r of recs) dailyCosts[r.date] = (dailyCosts[r.date] || 0) + r.cost;
-        const allDates = Object.keys(dailyCosts).sort();
-        const costSeries = allDates.map(d => dailyCosts[d]);
-        const recentSeries = costSeries.slice(-Math.floor(days / 2));
-        const priorSeries  = costSeries.slice(0, Math.floor(days / 2));
-
-        // ── Grace period ────────────────────────────────────────────────────
-        const isNew = inGracePeriod(resourceName);
-        if (isNew && totalCost < top1pctCost) {
-          // In grace period and not extreme cost — skip all signals
-          continue;
-        }
-
-        // ── Signal 1: Threshold breach ──────────────────────────────────────
-        // Absolute: extrapolate period spend to monthly
-        const periodDays = allDates.length || 1;
-        const monthlyEstimate = (totalCost / periodDays) * 30;
-        if (threshold.absoluteMonthly && monthlyEstimate > threshold.absoluteMonthly) {
-          const excess = monthlyEstimate - threshold.absoluteMonthly;
-          triggers.push({
-            type: "threshold_absolute",
-            detail: `Projected monthly spend ~${fmt(monthlyEstimate, currency)} exceeds ${fmt(threshold.absoluteMonthly, currency)} limit`,
-            confidenceAdd: 35,
-            tierAtLeast: threshold.tierAbsolute || "warning",
-            impact: excess / 30 * days
-          });
-          confidence += 35;
-        }
-
-        // Percentage: recent half vs prior half
-        const recentSum = recentSeries.reduce((s, v) => s + v, 0);
-        const priorSum  = priorSeries.reduce((s, v) => s + v, 0);
-        if (priorSum > 0.5 && threshold.momPct) {
-          const pctChange = ((recentSum - priorSum) / priorSum) * 100;
-          if (pctChange > threshold.momPct) {
-            triggers.push({
-              type: "threshold_pct",
-              detail: `Cost up ${pctChange.toFixed(0)}% vs prior period (limit: ${threshold.momPct}%)`,
-              confidenceAdd: 25,
-              tierAtLeast: threshold.tierPct || "watch",
-              impact: recentSum - priorSum
-            });
-            confidence += 25;
-          }
-        }
-
-        // ── Signal 2: Unusual cost jump (z-score) ───────────────────────────
-        if (costSeries.length >= 7) {
-          const baselineSeries = costSeries.slice(0, -3); // exclude last 3 days
-          const { mean, std } = stats1d(baselineSeries);
-          if (std > 0.01) {
-            const recentAvg = recentSeries.slice(-3).reduce((s, v) => s + v, 0) / 3;
-            const z = (recentAvg - mean) / std;
-            if (z > 2.0) {
-              const add = z > 3 ? 35 : 20;
-              triggers.push({
-                type: "unusual_jump",
-                detail: `Recent daily cost ${fmt(recentAvg, currency)} is ${z.toFixed(1)}σ above the ${Math.floor(days * 0.6)}-day average of ${fmt(mean, currency)}`,
-                confidenceAdd: add,
-                tierAtLeast: z > 3 ? "warning" : "watch",
-                impact: (recentAvg - mean) * 30
-              });
-              confidence += add;
-            }
-          }
-        }
-
-        // ── Signal 3: Faster-than-expected growth ───────────────────────────
-        if (costSeries.length >= 10) {
-          const priorSlope  = linRegSlope(priorSeries);
-          const recentSlope = linRegSlope(recentSeries);
-          // Signal if recent slope is materially steeper than prior
-          if (priorSlope > 0.01 && recentSlope > priorSlope * 2.0 && recentSeries.at(-1) > 1) {
-            triggers.push({
-              type: "growth_acceleration",
-              detail: `Cost growth rate has doubled vs prior period (${(recentSlope / priorSlope).toFixed(1)}× steeper)`,
-              confidenceAdd: 20,
-              tierAtLeast: "watch",
-              impact: recentSum - priorSum
-            });
-            confidence += 20;
-          } else if (priorSlope <= 0.01 && recentSlope > 0.15 && recentSeries.at(-1) > 1) {
-            // Was flat, now climbing
-            triggers.push({
-              type: "growth_acceleration",
-              detail: `Cost was flat but is now climbing at ${fmt(recentSlope * 30, currency)}/month rate`,
-              confidenceAdd: 15,
-              tierAtLeast: "watch",
-              impact: recentSlope * 30
-            });
-            confidence += 15;
-          }
-        }
-
-        // ── Signal 4: New top cost driver ───────────────────────────────────
-        const currentRank = rankedResources.indexOf(resourceName);
-        const priorRank   = priorRanked.indexOf(resourceName);
-        if (currentRank < 3 && (priorRank >= 5 || priorRank === -1) && totalCost > 2) {
-          triggers.push({
-            type: "new_top_driver",
-            detail: `Moved into top ${currentRank + 1} most expensive resources (was ranked #${priorRank >= 0 ? priorRank + 1 : "unranked"} previously)`,
-            confidenceAdd: 20,
-            tierAtLeast: "watch",
-            impact: totalCost
-          });
-          confidence += 20;
-        }
-
-        // ── Signal 5: Forecast breach ───────────────────────────────────────
-        if (threshold.absoluteMonthly && recentSeries.length >= 3) {
-          const dailyRate = recentSeries.slice(-7).reduce((s, v) => s + v, 0) /
-                            Math.min(recentSeries.length, 7);
-          const now = new Date();
-          const daysLeft = new Date(now.getUTCFullYear(), now.getUTCMonth() + 1, 0).getDate() - now.getUTCDate();
-          const monthStart = new Date(now.getUTCFullYear(), now.getUTCMonth(), 1).toISOString().slice(0, 10);
-          const mtd = recs.filter(r => r.date >= monthStart).reduce((s, r) => s + r.cost, 0);
-          const projected = mtd + dailyRate * daysLeft;
-          if (projected > threshold.absoluteMonthly * 1.15 && !triggers.find(t => t.type === "threshold_absolute")) {
-            triggers.push({
-              type: "forecast_breach",
-              detail: `On track to spend ${fmt(projected, currency)} this month (limit: ${fmt(threshold.absoluteMonthly, currency)})`,
-              confidenceAdd: 25,
-              tierAtLeast: "warning",
-              impact: projected - threshold.absoluteMonthly
-            });
-            confidence += 25;
-          }
-        }
-
-        // ── Signal 6: Idle VM (from metrics) ───────────────────────────────
-        const metrics = metricsData && metricsData[resourceName];
-        if (metrics && meta.service === "Microsoft.Compute") {
-          const isIdle = metrics.avgCpu7d < 5 && metrics.avgNetwork7d < 5;
-          const isVeryIdle = metrics.avgCpu7d < 2 && metrics.avgNetwork7d < 2;
-          if (isIdle && totalCost > 0.5) {
-            const add = isVeryIdle ? 35 : 20;
-            triggers.push({
-              type: "idle_vm",
-              detail: `VM CPU avg ${metrics.avgCpu7d.toFixed(1)}% over 7 days with ${fmt(totalCost / periodDays * 30, currency)}/month cost. Appears unused.`,
-              confidenceAdd: add,
-              tierAtLeast: isVeryIdle ? "warning" : "watch",
-              impact: totalCost / periodDays * 30,
-              action: "Consider deallocating or resizing this VM to reduce costs."
-            });
-            confidence += add;
-          }
-        }
-
-        // ── Skip if no triggers fired ───────────────────────────────────────
-        if (triggers.length === 0) continue;
-
-        // ── Confidence adjustments ──────────────────────────────────────────
-        // Persistence: signal visible for >3 days adds confidence
-        if (recentSeries.filter(v => v > 0).length >= 3 && triggers.length > 0) confidence += 10;
-        // Impact bonus
-        if (totalCost > 50) confidence += 20;
-        else if (totalCost > 10) confidence += 10;
-        // Data quality penalty
-        if (costSeries.length < 5) confidence -= 20;
-        if (costSeries.length < 3) confidence -= 15;
-        // Multiple corroborating signals bonus
-        if (triggers.length >= 2) confidence += 15;
-        if (triggers.length >= 3) confidence += 10;
-
-        confidence = Math.min(100, Math.max(0, confidence));
-
-        // ── Confidence tier ─────────────────────────────────────────────────
-        const confidenceTier = confidence >= 70 ? "high" : confidence >= 40 ? "medium" : "low";
-
-        // Low confidence → no alert (may surface as soft indicator later)
-        if (confidenceTier === "low") continue;
-
-        // ── Alert tier from triggers ─────────────────────────────────────────
-        // Take highest tier demanded by any trigger, bounded by confidence
-        let demandedTier = "watch";
-        for (const t of triggers) {
-          if (TIER_ORDER[t.tierAtLeast] > TIER_ORDER[demandedTier]) {
-            demandedTier = t.tierAtLeast;
-          }
-        }
-        // High confidence + threshold breach → critical
-        if (confidenceTier === "high" && triggers.some(t => t.type.startsWith("threshold"))) {
-          demandedTier = "critical";
-        }
-        // Medium confidence caps at warning
-        if (confidenceTier === "medium" && demandedTier === "critical") demandedTier = "warning";
-
-        tier = demandedTier;
-
-        // ── Build the primary reason string ─────────────────────────────────
-        // Primary = highest-confidence trigger; secondary listed after
-        const sortedTriggers = [...triggers].sort((a, b) => b.confidenceAdd - a.confidenceAdd);
-        const primaryTrigger = sortedTriggers[0];
-        const reason = primaryTrigger.detail;
-        const impact = Math.max(...triggers.map(t => t.impact || 0));
-
-        // ── Suggested action ─────────────────────────────────────────────────
-        const actionMap = {
-          threshold_absolute:  "Review this resource's configuration or set a higher budget threshold.",
-          threshold_pct:       "Investigate what changed in the second half of this period.",
-          unusual_jump:        "Check for unexpected deployments, data growth, or configuration changes.",
-          growth_acceleration: "Investigate recent changes that may have increased resource usage.",
-          new_top_driver:      "Determine if this resource's increased spending is expected.",
-          forecast_breach:     "Review resource usage and consider rightsizing before month end.",
-          idle_vm:             primaryTrigger.action || "Consider deallocating or resizing this VM."
-        };
-        const suggestedAction = actionMap[primaryTrigger.type] || "Review this resource.";
-
-        alerts.push({
-          resourceName,
-          service:   meta.service,
-          rg:        meta.resourceGroup,
-          location:  meta.location,
-          tier,
-          confidence,
-          confidenceTier,
-          triggers,
-          reason,
-          impact,
-          suggestedAction,
-          totalCost,
-          currency,
-          isNew,
-          hasOverride: hasOverride(resourceName, meta.service, meta.resourceGroup, meta.location)
-        });
-      }
-
-      // Sort: critical first, then warning, then watch; within tier by impact desc
-      return alerts.sort((a, b) =>
-        TIER_ORDER[b.tier] - TIER_ORDER[a.tier] || b.impact - a.impact
-      );
     }
 
     // =========================================================================
@@ -1362,25 +677,19 @@
     // =========================================================================
     // Dashboard: KPI Card
     // =========================================================================
-    function KpiCard({ label, value, trend }) {
+    function KpiCard({ label, value, sub, trend }) {
       const dark = useDark();
-      const tColor = trend == null ? ""
-        : trend > 0 ? (dark ? "text-rose-400" : "text-rose-600")
-        : (dark ? "text-emerald-400" : "text-emerald-600");
+      const color = trend == null ? "" : trend > 0 ? (dark ? "text-rose-400" : "text-rose-600") : (dark ? "text-emerald-400" : "text-emerald-600");
       return (
-        <div className={cx("rounded-xl border px-2.5 py-2",
-          dark ? "bg-gray-800 border-gray-700" : "bg-white border-slate-200")}>
-          <div className={cx("text-xs leading-tight mb-0.5",
-            dark ? "text-gray-500" : "text-slate-400")}>{label}</div>
-          <div className="flex items-baseline gap-1 flex-wrap">
-            <span className={cx("text-sm font-bold leading-tight",
-              dark ? "text-gray-100" : "text-slate-900")}>{value}</span>
-            {trend != null && (
-              <span className={cx("text-xs font-semibold leading-tight flex-shrink-0", tColor)}>
-                {trend > 0 ? "▲" : "▼"}{Math.abs(trend).toFixed(0)}%
-              </span>
-            )}
-          </div>
+        <div className={cx("rounded-xl border shadow-sm p-2.5", dark ? "bg-gray-800 border-gray-700" : "bg-white border-slate-200")}>
+          <div className={cx("text-xs font-medium leading-tight", dark ? "text-gray-400" : "text-slate-400")}>{label}</div>
+          <div className={cx("mt-0.5 font-bold leading-tight", dark ? "text-gray-100" : "text-slate-900",
+            value && value.length > 8 ? "text-sm" : "text-base")}>{value}</div>
+          {trend != null && (
+            <div className={cx("text-xs font-semibold mt-0.5 leading-tight", color)}>
+              {trend > 0 ? "▲" : "▼"}{Math.abs(trend).toFixed(0)}%
+            </div>
+          )}
         </div>
       );
     }
@@ -1431,264 +740,141 @@
       );
     }
 
-    function TimeSeriesChart({ records, currency, from, to, days, groupOpt, bucket, setBucket, style, setStyle, forecast, alerts, budget }) {
-      const dark = useDark();
-      const [hiddenSeries, setHiddenSeries] = useState(new Set());
-      const [alertPanel, setAlertPanel]     = useState(null); // { x, y, alerts }
-
-      const isGrouped = groupOpt && groupOpt.id !== "total";
-
-      // Compute alert day markers (only for spike/threshold signals)
-      const alertDays = useMemo(() =>
-        computeAlertDays(alerts || [], records, days),
-      [alerts, records, days]);
-
+    function TimeSeriesChart({ records, currency, from, to, days, groupOpt, bucket, setBucket, style, setStyle, showTotal, setShowTotal }) {
+      // Decide what data to render
+      const useGrouping = groupOpt && groupOpt.id !== "total";
       const series = useMemo(() => {
-        if (!isGrouped) {
-          const flat = buildTimeSeries(records, from, to, bucket, forecast?.forecastPoints);
-          return { rows: flat, groupNames: ["total"] };
+        if (!useGrouping) {
+          const flat = buildTimeSeries(records, from, to, bucket);
+          return { rows: flat.map(r => ({ ...r })), groupNames: ["total"] };
         }
-        // Grouped: build group series, then append forecast extension points
-        const gs = buildGroupedTimeSeries(records, from, to, bucket, groupOpt.fn, 6);
-        if (forecast?.forecastPoints && bucket === "day") {
-          const seen = new Set(gs.rows.map(r => r.key));
-          const extended = [...gs.rows];
-          for (const fp of forecast.forecastPoints) {
-            const { key, label } = bucketDate(fp.key, bucket);
-            if (seen.has(key)) continue;
-            seen.add(key);
-            const row = { key, label, forecast: fp.forecast };
-            for (const g of gs.groupNames) row[g] = null;
-            extended.push(row);
-          }
-          extended.sort((a, b) => a.key.localeCompare(b.key));
-          return { ...gs, rows: extended };
-        }
-        return gs;
-      }, [records, from, to, bucket, isGrouped, groupOpt && groupOpt.id, forecast]);
+        return buildGroupedTimeSeries(records, from, to, bucket, groupOpt.fn, 6);
+      }, [records, from, to, bucket, useGrouping, groupOpt && groupOpt.id]);
 
       const BUCKET_OPTS = [
-        { id: "day",   label: "Daily"   },
-        { id: "week",  label: "Weekly"  },
+        { id: "day",   label: "Daily" },
+        { id: "week",  label: "Weekly" },
         { id: "month", label: "Monthly" },
       ];
 
-      const gridColor    = dark ? "#374151" : "#f1f5f9";
-      const tickColor    = dark ? "#9ca3af" : "#94a3b8";
-      const tooltipStyle = dark
-        ? { background: "#1f2937", border: "1px solid #374151", borderRadius: 8, fontSize: 12 }
-        : { borderRadius: 8, fontSize: 12, border: "1px solid #e2e8f0" };
+      const isStacked = style === "stacked";
+      const isGrouped = useGrouping;
 
-      const visibleGroups = series.groupNames.filter(g => !hiddenSeries.has(g));
+      // Empty state
+      if (!series.rows.length) {
+        return (
+          <Card className="p-4">
+            <div className="text-sm font-semibold text-slate-700 mb-3">Cost over time</div>
+            <div className="text-sm text-slate-400 text-center py-8">No data in selected range.</div>
+          </Card>
+        );
+      }
 
-      const toggleSeries = (g) => {
-        setHiddenSeries(prev => {
-          const next = new Set(prev);
-          // Don't allow hiding all series
-          if (next.has(g)) { next.delete(g); }
-          else if (visibleGroups.length > 1) { next.add(g); }
-          return next;
-        });
-      };
-
+      // Tooltip: order entries by value desc and add a Total row when grouped
       const customTooltip = ({ active, payload, label }) => {
         if (!active || !payload || !payload.length) return null;
-        const actuals  = payload.filter(p => p.dataKey !== "forecast" && p.value != null && p.value > 0);
-        const fcst     = payload.find(p => p.dataKey === "forecast");
-        const total    = actuals.reduce((s, p) => s + p.value, 0);
+        const sorted = [...payload].filter(p => p.value > 0).sort((a, b) => b.value - a.value);
+        const total = sorted.reduce((s, p) => s + p.value, 0);
         return (
-          <div className="bg-white dark:bg-gray-800 border border-slate-200 rounded-lg shadow-md p-2.5 text-xs max-w-[240px]"
-               style={tooltipStyle}>
-            <div className="font-semibold text-slate-700 mb-1" style={{ color: dark ? "#e5e7eb" : "#334155" }}>{label}</div>
-            {isGrouped && actuals.length > 1 && (
+          <div className="bg-white border border-slate-200 rounded-lg shadow-md p-2.5 text-xs max-w-[260px]">
+            <div className="font-semibold text-slate-700 mb-1">{label}</div>
+            {isGrouped && (
               <div className="flex justify-between gap-3 pb-1 mb-1 border-b border-slate-100">
-                <span style={{ color: dark ? "#9ca3af" : "#64748b" }}>Total</span>
-                <span className="font-semibold tabular-nums" style={{ color: dark ? "#f3f4f6" : "#0f172a" }}>{fmt(total, currency)}</span>
+                <span className="text-slate-500">Total</span>
+                <span className="font-semibold text-slate-900 tabular-nums">{fmt(total, currency)}</span>
               </div>
             )}
-            {actuals.sort((a, b) => b.value - a.value).map((p, i) => (
+            {sorted.map((p, i) => (
               <div key={i} className="flex justify-between gap-3 py-0.5">
                 <span className="flex items-center gap-1.5 truncate">
                   <span className="w-2 h-2 rounded-full flex-shrink-0" style={{ background: p.color }} />
-                  <span style={{ color: dark ? "#d1d5db" : "#475569" }}>{p.dataKey === "total" ? "Cost" : p.dataKey}</span>
+                  <span className="truncate text-slate-600">{p.dataKey === "total" ? "Cost" : p.dataKey}</span>
                 </span>
-                <span className="tabular-nums font-medium" style={{ color: dark ? "#f3f4f6" : "#0f172a" }}>{fmt(p.value, currency)}</span>
+                <span className="tabular-nums text-slate-900 font-medium flex-shrink-0">{fmt(p.value, currency)}</span>
               </div>
             ))}
-            {fcst && (
-              <div className="flex justify-between gap-3 py-0.5 border-t border-dashed border-slate-200 mt-1 pt-1">
-                <span style={{ color: dark ? "#9ca3af" : "#64748b" }}>Forecast</span>
-                <span className="tabular-nums" style={{ color: dark ? "#93c5fd" : "#3b82f6" }}>{fmt(fcst.value, currency)}/day</span>
-              </div>
-            )}
           </div>
         );
       };
 
-      // Custom dot to show alert markers on spike days
-      const AlertDot = ({ cx, cy, payload, dataKey }) => {
-        const dayAlerts = alertDays[payload.key];
-        if (!dayAlerts || !dayAlerts.length || dataKey !== (isGrouped ? visibleGroups[0] : "total")) return null;
-        const tier = dayAlerts[0].tier;
-        const color = tier === "critical" ? "#ef4444" : tier === "warning" ? "#f59e0b" : "#3b82f6";
-        return (
-          <g>
-            <circle cx={cx} cy={cy} r={5} fill={color} stroke="white" strokeWidth={1.5}
-              style={{ cursor: "pointer" }}
-              onClick={(e) => {
-                e.stopPropagation();
-                setAlertPanel(prev =>
-                  prev && prev.key === payload.key ? null : { key: payload.key, label: payload.label, alerts: dayAlerts, x: cx, y: cy }
-                );
-              }} />
-          </g>
-        );
-      };
-
-      if (!series.rows.length) {
-        return (
-          <Section title="Cost over time" storageKey="time-series">
-            <div className={cx("p-4 text-sm text-center", dark ? "bg-gray-800 text-gray-500" : "bg-white text-slate-400")}>No data in range.</div>
-          </Section>
-        );
-      }
-
-      const tsTitle = isGrouped ? `Cost by ${groupOpt.label.toLowerCase()}` : "Cost over time";
-      const tsBucketLabel = BUCKET_OPTS.find(b => b.id === bucket)?.label.toLowerCase() || bucket;
-      const dailyBudget = budget > 0 ? budget / 30 : null;
-      const isStacked = style === "stacked";
+      const dark = useDark();
+      const gridColor = dark ? "#374151" : "#f1f5f9";
+      const tickColor = dark ? "#9ca3af" : "#94a3b8";
+      const tooltipStyle = dark ? { background: "#1f2937", border: "1px solid #374151", borderRadius: 8, fontSize: 12 }
+                                : { borderRadius: 8, fontSize: 12 };
+      const tsTitle = isGrouped ? `Cost by ${groupOpt.label.toLowerCase()}` : "Daily cost";
+      const tsBucketLabel = BUCKET_OPTS.find(b => b.id === bucket).label.toLowerCase();
 
       return (
         <Section title={tsTitle} right={`(${tsBucketLabel})`} storageKey="time-series">
           <div className={cx("p-4", dark ? "bg-gray-800" : "bg-white")}>
-            {/* Controls */}
-            <div className="flex flex-wrap items-center gap-2 mb-3">
-              <div className={cx("flex gap-0.5 rounded-md p-0.5 border", dark ? "bg-gray-700 border-gray-600" : "bg-slate-100 border-slate-200")}>
-                {BUCKET_OPTS.map(b => (
-                  <button key={b.id} onClick={() => setBucket(b.id)}
-                    className={cx("text-xs px-2.5 py-1 rounded font-medium transition-colors",
-                      bucket === b.id ? (dark ? "bg-gray-500 text-white" : "bg-white text-slate-900 shadow-sm")
-                                      : (dark ? "text-gray-400 hover:text-gray-200" : "text-slate-500 hover:text-slate-700"))}>
-                    {b.label}
-                  </button>
-                ))}
-              </div>
-              {isGrouped && (
-                <div className={cx("flex gap-0.5 rounded-md p-0.5 border", dark ? "bg-gray-700 border-gray-600" : "bg-slate-100 border-slate-200")}>
-                  {["stacked", "lines"].map(s => (
-                    <button key={s} onClick={() => setStyle(s)}
-                      className={cx("text-xs px-2.5 py-1 rounded font-medium transition-colors capitalize",
-                        style === s ? (dark ? "bg-gray-500 text-white" : "bg-white text-slate-900 shadow-sm")
-                                    : (dark ? "text-gray-400 hover:text-gray-200" : "text-slate-500 hover:text-slate-700"))}>
-                      {s}
-                    </button>
-                  ))}
-                </div>
-              )}
-              {Object.keys(alertDays).length > 0 && (
-                <span className={cx("text-xs flex items-center gap-1", dark ? "text-gray-500" : "text-slate-400")}>
-                  <span className="w-2 h-2 rounded-full bg-amber-400 inline-block" /> tap dots for alerts
-                </span>
-              )}
+          {/* Controls row: bucket + style toggle */}
+          <div className="flex flex-wrap items-center gap-2 mb-3">
+            <div className="flex gap-1 bg-slate-100 rounded-md p-0.5">
+              {BUCKET_OPTS.map(b => (
+                <button key={b.id} onClick={() => setBucket(b.id)}
+                  className={cx("text-xs px-2.5 py-1 rounded font-medium transition-colors",
+                    bucket === b.id ? "bg-white text-slate-900 shadow-sm" : "text-slate-500 hover:text-slate-700")}>
+                  {b.label}
+                </button>
+              ))}
             </div>
-
-            {/* Chart */}
-            <div style={{ height: 260, position: "relative" }}>
-              <ResponsiveContainer width="100%" height="100%">
-                {(isGrouped && isStacked) ? (
-                  <AreaChart data={series.rows} margin={{ top: 5, right: 5, bottom: 0, left: -10 }}>
-                    <CartesianGrid strokeDasharray="3 3" stroke={gridColor} />
-                    <XAxis dataKey="label" tick={{ fontSize: 10, fill: tickColor }} interval="preserveStartEnd" />
-                    <YAxis tick={{ fontSize: 10, fill: tickColor }} tickFormatter={v => fmtCompact(v, currency)} width={55} />
-                    <Tooltip content={customTooltip} />
-                    {dailyBudget && (
-                      <Recharts.ReferenceLine y={dailyBudget} stroke="#ef4444" strokeDasharray="5 3"
-                        label={{ value: "Budget", fill: "#ef4444", fontSize: 10, position: "right" }} />
-                    )}
-                    {series.groupNames.filter(g => !hiddenSeries.has(g)).map((g, i) => (
-                      <Area key={g} type="monotone" dataKey={g} stackId="1"
-                        stroke={PALETTE[i % PALETTE.length]} fill={PALETTE[i % PALETTE.length]}
-                        fillOpacity={0.5} strokeWidth={1.5}
-                        dot={<AlertDot dataKey={g} />} />
-                    ))}
-                  </AreaChart>
-                ) : (
-                  <LineChart data={series.rows} margin={{ top: 5, right: 5, bottom: 0, left: -10 }}>
-                    <CartesianGrid strokeDasharray="3 3" stroke={gridColor} />
-                    <XAxis dataKey="label" tick={{ fontSize: 10, fill: tickColor }} interval="preserveStartEnd" />
-                    <YAxis tick={{ fontSize: 10, fill: tickColor }} tickFormatter={v => fmtCompact(v, currency)} width={55} />
-                    <Tooltip content={customTooltip} />
-                    {dailyBudget && (
-                      <Recharts.ReferenceLine y={dailyBudget} stroke="#ef4444" strokeDasharray="5 3"
-                        label={{ value: "Budget", fill: "#ef4444", fontSize: 10, position: "right" }} />
-                    )}
-                    {series.groupNames.filter(g => !hiddenSeries.has(g)).map((g, i) => (
-                      <Line key={g} type="monotone" dataKey={g}
-                        stroke={isGrouped ? PALETTE[i % PALETTE.length] : "#3b82f6"}
-                        strokeWidth={2} dot={<AlertDot dataKey={g} />} activeDot={{ r: 4 }}
-                        connectNulls={false} />
-                    ))}
-                    {/* Forecast dashed line — total for non-grouped, or "Other" total when grouped */}
-                    {series.rows.some(r => r.forecast != null) && (
-                      <Line type="monotone" dataKey="forecast"
-                        stroke={dark ? "#93c5fd" : "#3b82f6"} strokeWidth={1.5} strokeDasharray="6 3"
-                        dot={false} activeDot={false} connectNulls={true}
-                        legendType="none" />
-                    )}
-                  </LineChart>
-                )}
-              </ResponsiveContainer>
-
-              {/* Floating alert panel */}
-              {alertPanel && (
-                <div className={cx(
-                  "absolute z-10 rounded-xl border shadow-lg p-3 text-xs max-w-[220px]",
-                  dark ? "bg-gray-800 border-gray-600" : "bg-white border-slate-200"
-                )} style={{ top: Math.max(8, alertPanel.y - 80), left: Math.min(alertPanel.x - 10, 160) }}>
-                  <div className="flex items-center justify-between mb-2">
-                    <span className={cx("font-semibold", dark ? "text-gray-100" : "text-slate-800")}>{alertPanel.label}</span>
-                    <button onClick={() => setAlertPanel(null)}
-                      className={cx("text-xs", dark ? "text-gray-500 hover:text-gray-300" : "text-slate-400 hover:text-slate-600")}>✕</button>
-                  </div>
-                  {alertPanel.alerts.map((a, i) => {
-                    const tc = TIER_CONFIG[a.tier] || TIER_CONFIG.watch;
-                    return (
-                      <div key={i} className="py-1 border-t border-slate-100 first:border-0">
-                        <span className={cx("inline-block text-xs px-1.5 py-0.5 rounded-full font-bold mb-0.5", tc.badge)}>{tc.label}</span>
-                        <div className={cx("font-medium", dark ? "text-gray-200" : "text-slate-700")}>{a.resourceName}</div>
-                        <div className={cx(dark ? "text-gray-400" : "text-slate-500")}>{a.reason.slice(0, 80)}{a.reason.length > 80 ? "…" : ""}</div>
-                      </div>
-                    );
-                  })}
-                </div>
-              )}
-            </div>
-
-            {/* Custom legend with click-to-toggle */}
             {isGrouped && (
-              <div className={cx("flex flex-wrap gap-x-3 gap-y-1.5 mt-3 pt-3 border-t",
-                dark ? "border-gray-700" : "border-slate-100")}>
-                {series.groupNames.map((g, i) => {
-                  const hidden = hiddenSeries.has(g);
-                  return (
-                    <button key={g} onClick={() => toggleSeries(g)}
-                      className={cx("flex items-center gap-1.5 text-xs transition-opacity",
-                        hidden ? "opacity-35" : "opacity-100",
-                        dark ? "text-gray-400 hover:text-gray-200" : "text-slate-600 hover:text-slate-900")}>
-                      <span className="w-2.5 h-2.5 rounded-sm flex-shrink-0 transition-opacity"
-                        style={{ background: hidden ? (dark ? "#4b5563" : "#cbd5e1") : PALETTE[i % PALETTE.length] }} />
-                      <span className="truncate max-w-[100px]" title={g}>{g}</span>
-                    </button>
-                  );
-                })}
-                {hiddenSeries.size > 0 && (
-                  <button onClick={() => setHiddenSeries(new Set())}
-                    className={cx("text-xs underline", dark ? "text-gray-500" : "text-slate-400")}>
-                    show all
-                  </button>
-                )}
+              <div className="flex gap-1 bg-slate-100 rounded-md p-0.5">
+                <button onClick={() => setStyle("stacked")}
+                  className={cx("text-xs px-2.5 py-1 rounded font-medium transition-colors",
+                    style === "stacked" ? "bg-white text-slate-900 shadow-sm" : "text-slate-500 hover:text-slate-700")}>
+                  Stacked
+                </button>
+                <button onClick={() => setStyle("lines")}
+                  className={cx("text-xs px-2.5 py-1 rounded font-medium transition-colors",
+                    style === "lines" ? "bg-white text-slate-900 shadow-sm" : "text-slate-500 hover:text-slate-700")}>
+                  Lines
+                </button>
               </div>
             )}
+          </div>
+
+          <div style={{ height: 260 }}>
+            <ResponsiveContainer width="100%" height="100%">
+              {(isGrouped && isStacked) ? (
+                <AreaChart data={series.rows} margin={{ top: 5, right: 5, bottom: 0, left: -10 }}>
+                  <CartesianGrid strokeDasharray="3 3" stroke={gridColor} />
+                  <XAxis dataKey="label" tick={{ fontSize: 10, fill: tickColor }} interval="preserveStartEnd" />
+                  <YAxis tick={{ fontSize: 10, fill: tickColor }} tickFormatter={v => fmtCompact(v, currency)} width={55} />
+                  <Tooltip content={customTooltip} />
+                  {series.groupNames.map((g, i) => (
+                    <Area key={g} type="monotone" dataKey={g} stackId="1"
+                      stroke={PALETTE[i % PALETTE.length]} fill={PALETTE[i % PALETTE.length]} fillOpacity={0.5} strokeWidth={1.5} />
+                  ))}
+                </AreaChart>
+              ) : (
+                <LineChart data={series.rows} margin={{ top: 5, right: 5, bottom: 0, left: -10 }}>
+                  <CartesianGrid strokeDasharray="3 3" stroke={gridColor} />
+                  <XAxis dataKey="label" tick={{ fontSize: 10, fill: tickColor }} interval="preserveStartEnd" />
+                  <YAxis tick={{ fontSize: 10, fill: tickColor }} tickFormatter={v => fmtCompact(v, currency)} width={55} />
+                  <Tooltip content={customTooltip} />
+                  {series.groupNames.map((g, i) => (
+                    <Line key={g} type="monotone" dataKey={g}
+                      stroke={isGrouped ? PALETTE[i % PALETTE.length] : "#3b82f6"}
+                      strokeWidth={2} dot={false} activeDot={{ r: 4 }} />
+                  ))}
+                </LineChart>
+              )}
+            </ResponsiveContainer>
+          </div>
+
+          {/* Custom legend below the chart, only when grouped */}
+          {isGrouped && (
+            <div className={cx("flex flex-wrap gap-x-3 gap-y-1.5 mt-3 pt-3 border-t", dark ? "border-gray-700" : "border-slate-100")}>
+              {series.groupNames.map((g, i) => (
+                <div key={g} className={cx("flex items-center gap-1.5 text-xs max-w-full", dark ? "text-gray-400" : "text-slate-600")}>
+                  <span className="w-2.5 h-2.5 rounded-sm flex-shrink-0" style={{ background: PALETTE[i % PALETTE.length] }} />
+                  <span className="truncate" title={g}>{g}</span>
+                </div>
+              ))}
+            </div>
+          )}
           </div>
         </Section>
       );
@@ -1818,27 +1004,15 @@
                 {rows.length === 0 && (
                   <tr><td colSpan={3} className={cx("px-4 py-8 text-center text-sm", dark ? "text-gray-500" : "text-slate-400")}>No results</td></tr>
                 )}
-                {rows.slice(0, 100).map((r, i) => {
-                  // Check if this item has a custom threshold override
-                  const overrideKey = `thresholds:${groupOpt.id === "service" ? "service" : groupOpt.id === "resourceGroup" ? "rg" : groupOpt.id === "location" ? "location" : "resource"}:${r.name}`;
-                  const rowHasOverride = kv.get(overrideKey) !== null;
-                  return (
-                    <tr key={i} className={cx("transition-colors", dark ? "hover:bg-gray-700" : "hover:bg-slate-50")}>
-                      <td className={cx("px-4 py-2.5 font-medium max-w-[200px]", dark ? "text-gray-200" : "text-slate-900")} title={r.name}>
-                        <div className="flex items-center gap-1.5 min-w-0">
-                          <span className="truncate">{r.name}</span>
-                          {rowHasOverride && (
-                            <span title="Custom threshold set" className="w-1.5 h-1.5 rounded-full bg-blue-500 flex-shrink-0" />
-                          )}
-                        </div>
-                      </td>
-                      <td className={cx("px-4 py-2.5 text-right tabular-nums", dark ? "text-gray-200" : "text-slate-900")}>{fmt(r.cost, currency)}</td>
-                      <td className={cx("px-4 py-2.5 text-right tabular-nums hidden sm:table-cell", dark ? "text-gray-500" : "text-slate-400")}>
-                        {total > 0 ? ((r.cost / total) * 100).toFixed(1) + "%" : "—"}
-                      </td>
-                    </tr>
-                  );
-                })}
+                {rows.slice(0, 100).map((r, i) => (
+                  <tr key={i} className={cx("transition-colors", dark ? "hover:bg-gray-700" : "hover:bg-slate-50")}>
+                    <td className={cx("px-4 py-2.5 font-medium max-w-[200px] truncate", dark ? "text-gray-200" : "text-slate-900")} title={r.name}>{r.name}</td>
+                    <td className={cx("px-4 py-2.5 text-right tabular-nums", dark ? "text-gray-200" : "text-slate-900")}>{fmt(r.cost, currency)}</td>
+                    <td className={cx("px-4 py-2.5 text-right tabular-nums hidden sm:table-cell", dark ? "text-gray-500" : "text-slate-400")}>
+                      {total > 0 ? ((r.cost / total) * 100).toFixed(1) + "%" : "—"}
+                    </td>
+                  </tr>
+                ))}
               </tbody>
             </table>
             {rows.length > 100 && (
@@ -1852,827 +1026,93 @@
     }
 
     // =========================================================================
-    // INSIGHT CARDS (Pass 2)
-    // =========================================================================
-
-    const TIER_CONFIG = {
-      critical: { label: "Critical", icon: "🔴",
-        light: "bg-red-50 border-red-200",     dark_: "bg-red-950 border-red-900",
-        badge: "bg-red-600 text-white",         text: "text-red-700",  darkText: "text-red-300" },
-      warning:  { label: "Warning",  icon: "🟠",
-        light: "bg-amber-50 border-amber-200",  dark_: "bg-amber-950 border-amber-900",
-        badge: "bg-amber-500 text-white",       text: "text-amber-700", darkText: "text-amber-300" },
-      watch:    { label: "Watch",    icon: "🔵",
-        light: "bg-blue-50 border-blue-200",    dark_: "bg-blue-950 border-blue-900",
-        badge: "bg-blue-500 text-white",        text: "text-blue-700",  darkText: "text-blue-300" },
-    };
-
-    const CONFIDENCE_CONFIG = {
-      high:   { label: "High confidence",   dot: "bg-emerald-500" },
-      medium: { label: "Med confidence",    dot: "bg-amber-500"   },
-      low:    { label: "Low confidence",    dot: "bg-slate-400"   },
-    };
-
-    const TRIGGER_LABELS = {
-      threshold_absolute:  "Threshold breach",
-      threshold_pct:       "% threshold breach",
-      unusual_jump:        "Unusual cost jump",
-      growth_acceleration: "Accelerating growth",
-      new_top_driver:      "New top cost driver",
-      forecast_breach:     "Forecast breach",
-      idle_vm:             "Idle VM detected",
-    };
-
-    function InsightCard({ alert, dark }) {
-      const [expanded, setExpanded] = useState(false);
-      const tc = TIER_CONFIG[alert.tier] || TIER_CONFIG.watch;
-      const cc = CONFIDENCE_CONFIG[alert.confidenceTier] || CONFIDENCE_CONFIG.medium;
-      const cardBg   = dark ? tc.dark_ : tc.light;
-      const textMain = dark ? "text-gray-100" : "text-slate-900";
-      const textMid  = dark ? "text-gray-300" : "text-slate-700";
-      const textMuted= dark ? "text-gray-500" : "text-slate-500";
-
-      return (
-        <div className={cx("rounded-xl border p-4 space-y-2", cardBg)}>
-          {/* Row 1: badge + resource + confidence */}
-          <div className="flex flex-wrap items-center gap-2">
-            <span className={cx("text-xs px-2 py-0.5 rounded-full font-bold", tc.badge)}>
-              {tc.label}
-            </span>
-            <span className={cx("text-sm font-bold", textMain)}>{alert.resourceName}</span>
-            {alert.hasOverride && (
-              <span className="text-xs px-1.5 py-0.5 rounded bg-blue-100 text-blue-700 font-medium">
-                custom threshold
-              </span>
-            )}
-            {alert.isNew && (
-              <span className="text-xs px-1.5 py-0.5 rounded bg-amber-100 text-amber-700 font-medium">
-                new resource
-              </span>
-            )}
-            <div className="flex items-center gap-1 ml-auto flex-shrink-0">
-              <span className={cx("w-2 h-2 rounded-full flex-shrink-0", cc.dot)} />
-              <span className={cx("text-xs font-medium", textMuted)}>{cc.label}</span>
-            </div>
-          </div>
-
-          {/* Row 2: service + rg */}
-          <div className={cx("text-xs", textMuted)}>
-            {alert.service} · {alert.rg}
-            {alert.location && alert.location !== "—" ? ` · ${alert.location}` : ""}
-          </div>
-
-          {/* Row 3: reason */}
-          <div className={cx("text-sm leading-snug", textMid)}>{alert.reason}</div>
-
-          {/* Row 4: impact + action */}
-          <div className="grid grid-cols-2 gap-2 text-xs">
-            <div className={cx("rounded-lg p-2", dark ? "bg-black/20" : "bg-white/60")}>
-              <div className={cx("font-medium mb-0.5", textMuted)}>Est. impact</div>
-              <div className={cx("font-bold", textMain)}>{fmt(alert.impact, alert.currency)}/mo</div>
-            </div>
-            <div className={cx("rounded-lg p-2", dark ? "bg-black/20" : "bg-white/60")}>
-              <div className={cx("font-medium mb-0.5", textMuted)}>Suggestion</div>
-              <div className={cx("leading-tight", textMid)}>{alert.suggestedAction}</div>
-            </div>
-          </div>
-
-          {/* Row 5: triggers (expandable) */}
-          {alert.triggers.length > 1 && (
-            <button onClick={() => setExpanded(v => !v)}
-              className={cx("text-xs flex items-center gap-1 transition-colors", textMuted, dark ? "hover:text-gray-300" : "hover:text-slate-700")}>
-              <span>{expanded ? "▲" : "▼"}</span>
-              {alert.triggers.length} signals
-            </button>
-          )}
-          {(expanded || alert.triggers.length === 1) && (
-            <div className="space-y-1">
-              {alert.triggers.map((t, i) => (
-                <div key={i} className={cx("text-xs flex items-start gap-1.5", textMuted)}>
-                  <span className="flex-shrink-0 mt-0.5">·</span>
-                  <span><span className="font-medium">{TRIGGER_LABELS[t.type] || t.type}:</span> {t.detail}</span>
-                </div>
-              ))}
-            </div>
-          )}
-        </div>
-      );
-    }
-
-    function InsightCards({ alerts, dark }) {
-      const [watchOpen, setWatchOpen] = useState(false);
-      const critical = alerts.filter(a => a.tier === "critical");
-      const warning  = alerts.filter(a => a.tier === "warning");
-      const watch    = alerts.filter(a => a.tier === "watch");
-      if (alerts.length === 0) return null;
-      const hdr = dark ? "text-gray-100" : "text-slate-900";
-      const muted = dark ? "text-gray-500" : "text-slate-500";
-      const divider = dark ? "border-gray-700" : "border-slate-200";
-
-      return (
-        <div className={cx("rounded-xl border shadow-sm overflow-hidden", dark ? "bg-gray-800 border-gray-700" : "bg-white border-slate-200")}>
-          <div className={cx("px-4 py-3 flex items-center gap-2 border-b", divider)}>
-            <span className={cx("text-sm font-semibold", hdr)}>Insights</span>
-            <div className="flex gap-1.5">
-              {critical.length > 0 && <span className="text-xs px-2 py-0.5 rounded-full bg-red-600 text-white font-bold">{critical.length} critical</span>}
-              {warning.length  > 0 && <span className="text-xs px-2 py-0.5 rounded-full bg-amber-500 text-white font-bold">{warning.length} warning</span>}
-              {watch.length    > 0 && <span className="text-xs px-2 py-0.5 rounded-full bg-blue-500 text-white font-bold">{watch.length} watch</span>}
-            </div>
-          </div>
-
-          <div className="p-3 space-y-3">
-            {/* Critical + Warning always visible */}
-            {[...critical, ...warning].map((a, i) => (
-              <InsightCard key={i} alert={a} dark={dark} />
-            ))}
-
-            {/* Watch: collapsed by default */}
-            {watch.length > 0 && (
-              <div>
-                <button onClick={() => setWatchOpen(v => !v)}
-                  className={cx("w-full flex items-center justify-between px-3 py-2 rounded-lg text-xs font-medium transition-colors",
-                    dark ? "bg-gray-700 hover:bg-gray-600 text-gray-300" : "bg-slate-100 hover:bg-slate-200 text-slate-600")}>
-                  <span>{watchOpen ? "▲" : "▼"} Watch alerts ({watch.length})</span>
-                  <span className={muted}>{watchOpen ? "Collapse" : "Show"}</span>
-                </button>
-                {watchOpen && (
-                  <div className="mt-2 space-y-2">
-                    {watch.map((a, i) => <InsightCard key={i} alert={a} dark={dark} />)}
-                  </div>
-                )}
-              </div>
-            )}
-          </div>
-        </div>
-      );
-    }
-
-    // =========================================================================
-    // ALERTS TAB (Pass 3)
-    // =========================================================================
-
-    const SCOPE_TYPES = [
-      { id: "service",  label: "Service" },
-      { id: "rg",       label: "Resource group" },
-      { id: "location", label: "Location" },
-      { id: "resource", label: "Resource" },
-    ];
-
-    function ThresholdFields({ values, onChange, currency }) {
-      const dark = useDark();
-      const lbl = cx("block text-xs font-medium mb-1", dark ? "text-gray-400" : "text-slate-500");
-      const inp = cx("w-full text-sm rounded-md px-3 py-1.5 border focus:outline-none",
-        dark ? "bg-gray-700 border-gray-600 text-gray-100 focus:border-blue-500"
-             : "bg-white border-slate-200 text-slate-900 focus:border-blue-400");
-      const sel = cx(inp, "cursor-pointer");
-
-      return (
-        <div className="grid grid-cols-2 gap-3 mt-3">
-          <div>
-            <label className={lbl}>Absolute limit / month ({currency})</label>
-            <input type="number" min="0" step="1" value={values.absoluteMonthly ?? ""}
-              onChange={e => onChange({ ...values, absoluteMonthly: parseFloat(e.target.value) || 0 })}
-              className={inp} placeholder="e.g. 50" />
-          </div>
-          <div>
-            <label className={lbl}>Alert tier (absolute)</label>
-            <select value={values.tierAbsolute || "warning"} onChange={e => onChange({ ...values, tierAbsolute: e.target.value })} className={sel}>
-              <option value="watch">Watch</option>
-              <option value="warning">Warning</option>
-              <option value="critical">Critical</option>
-            </select>
-          </div>
-          <div>
-            <label className={lbl}>Month-over-month increase (%)</label>
-            <input type="number" min="1" max="500" step="1" value={values.momPct ?? ""}
-              onChange={e => onChange({ ...values, momPct: parseFloat(e.target.value) || 0 })}
-              className={inp} placeholder="e.g. 25" />
-          </div>
-          <div>
-            <label className={lbl}>Alert tier (% change)</label>
-            <select value={values.tierPct || "watch"} onChange={e => onChange({ ...values, tierPct: e.target.value })} className={sel}>
-              <option value="watch">Watch</option>
-              <option value="warning">Warning</option>
-              <option value="critical">Critical</option>
-            </select>
-          </div>
-
-        </div>
-      );
-    }
-
-    function GlobalDefaultsSection({ currency, onSaved }) {
-      const dark = useDark();
-      const [values, setValues] = useState(() => ensureGlobalThreshold());
-      const [saved, setSaved] = useState(false);
-      const bg    = dark ? "bg-gray-800"  : "bg-white";
-      const hdr   = dark ? "text-gray-100": "text-slate-900";
-      const muted = dark ? "text-gray-400": "text-slate-500";
-      const divider = dark ? "border-gray-700" : "border-slate-100";
-
-      const save = () => {
-        kv.set("thresholds:global", values);
-        setSaved(true);
-        setTimeout(() => setSaved(false), 2000);
-        if (onSaved) onSaved();
-      };
-
-      return (
-        <div className={cx("rounded-xl border shadow-sm overflow-hidden", dark ? "border-gray-700" : "border-slate-200", bg)}>
-          <div className={cx("px-4 py-3 border-b flex items-center justify-between", divider)}>
-            <div>
-              <span className={cx("text-sm font-semibold", hdr)}>Global defaults</span>
-              <span className={cx("text-xs ml-2", muted)}>Applies to all resources unless overridden</span>
-            </div>
-          </div>
-          <div className="px-4 pb-4">
-            <ThresholdFields values={values} onChange={setValues} currency={currency} />
-            <div className="flex justify-end mt-3">
-              <button onClick={save}
-                className="text-sm px-4 py-2 rounded-lg bg-blue-600 text-white font-medium hover:bg-blue-700 transition-colors">
-                {saved ? "✓ Saved" : "Save defaults"}
-              </button>
-            </div>
-          </div>
-        </div>
-      );
-    }
-
-    function OverrideRow({ override, onEdit, onDelete, dark }) {
-      const [confirming, setConfirming] = useState(false);
-      const parts   = override.key.split(":");
-      const scope   = parts[1]; // service|rg|location|resource
-      const target  = parts.slice(2).join(":");
-      const scopeLabel = { service: "Service", rg: "Resource group", location: "Location", resource: "Resource" }[scope] || scope;
-      const bg    = dark ? "bg-gray-800 border-gray-700" : "bg-white border-slate-200";
-      const text  = dark ? "text-gray-100" : "text-slate-900";
-      const muted = dark ? "text-gray-400" : "text-slate-500";
-      const globals = ensureGlobalThreshold();
-
-      const diffs = [];
-      if (override.absoluteMonthly !== globals.absoluteMonthly)
-        diffs.push(`Absolute: ${override.absoluteMonthly}`);
-      if (override.momPct !== globals.momPct)
-        diffs.push(`MoM: ${override.momPct}%`);
-      if (override.tierAbsolute !== globals.tierAbsolute)
-        diffs.push(`Tier(abs): ${override.tierAbsolute}`);
-      if (override.tierPct !== globals.tierPct)
-        diffs.push(`Tier(%): ${override.tierPct}`);
-
-      return (
-        <div className={cx("flex items-center gap-3 px-4 py-3 border-b last:border-0", dark ? "border-gray-700" : "border-slate-100")}>
-          <div className="flex-1 min-w-0">
-            <div className="flex items-center gap-2">
-              <span className={cx("text-xs px-1.5 py-0.5 rounded font-medium", dark ? "bg-gray-700 text-gray-300" : "bg-slate-100 text-slate-600")}>
-                {scopeLabel}
-              </span>
-              <span className={cx("text-sm font-medium truncate", text)}>{target}</span>
-            </div>
-            {diffs.length > 0 && (
-              <div className={cx("text-xs mt-0.5", muted)}>{diffs.join(" · ")}</div>
-            )}
-          </div>
-          <div className="flex items-center gap-1 flex-shrink-0">
-            <button onClick={() => onEdit(override)}
-              className={cx("text-xs px-2 py-1 rounded border transition-colors",
-                dark ? "border-gray-600 text-gray-400 hover:bg-gray-700" : "border-slate-200 text-slate-600 hover:bg-slate-50")}>
-              Edit
-            </button>
-            {confirming
-              ? <button onClick={() => { onDelete(override.key); setConfirming(false); }}
-                  className="text-xs px-2 py-1 rounded bg-red-600 text-white font-medium">Confirm</button>
-              : <button onClick={() => setConfirming(true)}
-                  className={cx("text-xs px-2 py-1 rounded border transition-colors",
-                    dark ? "border-gray-600 text-red-400 hover:bg-gray-700" : "border-slate-200 text-red-600 hover:bg-red-50")}>
-                  Delete
-                </button>
-            }
-          </div>
-        </div>
-      );
-    }
-
-    function AddOverrideSection({ records, currency, onSaved, editingOverride, onCancelEdit }) {
-      const dark = useDark();
-      const [scopeType, setScopeType] = useState(editingOverride ? editingOverride.key.split(":")[1] : "service");
-      const [target, setTarget]       = useState(editingOverride ? editingOverride.key.split(":").slice(2).join(":") : "");
-      const [values, setValues]       = useState(() => editingOverride ? { ...editingOverride } : { ...THRESHOLD_DEFAULTS });
-      const [saved, setSaved]         = useState(false);
-      const [error, setError]         = useState("");
-
-      // Populate target options from records
-      const targetOptions = useMemo(() => {
-        if (!records) return [];
-        const sets = { service: new Set(), rg: new Set(), location: new Set(), resource: new Set() };
-        for (const r of records) {
-          sets.service.add(r.service);
-          sets.rg.add(r.resourceGroup);
-          sets.location.add(r.location);
-          sets.resource.add(r.resourceName);
-        }
-        return [...(sets[scopeType] || new Set())].filter(Boolean).sort();
-      }, [records, scopeType]);
-
-      const bg    = dark ? "bg-gray-800 border-gray-700" : "bg-white border-slate-200";
-      const hdr   = dark ? "text-gray-100" : "text-slate-900";
-      const muted = dark ? "text-gray-400" : "text-slate-500";
-      const sel   = cx("w-full text-sm rounded-md px-3 py-1.5 border focus:outline-none",
-        dark ? "bg-gray-700 border-gray-600 text-gray-100 focus:border-blue-500"
-             : "bg-white border-slate-200 text-slate-900 focus:border-blue-400");
-
-      const save = () => {
-        if (!target) { setError("Please select a target."); return; }
-        if (values.absoluteMonthly <= 0) { setError("Absolute limit must be > 0."); return; }
-        if (values.momPct < 1 || values.momPct > 500) { setError("MoM% must be 1–500."); return; }
-        const key = `thresholds:${scopeType}:${target}`;
-        kv.set(key, { ...values, enabled: true });
-        setSaved(true);
-        setTimeout(() => { setSaved(false); if (onSaved) onSaved(); }, 1200);
-        setError("");
-      };
-
-      const cancel = () => { if (onCancelEdit) onCancelEdit(); };
-
-      return (
-        <div className={cx("rounded-xl border shadow-sm overflow-hidden", bg)}>
-          <div className={cx("px-4 py-3 border-b flex items-center justify-between", dark ? "border-gray-700" : "border-slate-100")}>
-            <span className={cx("text-sm font-semibold", hdr)}>
-              {editingOverride ? "Edit override" : "Add override"}
-            </span>
-            {editingOverride && (
-              <button onClick={cancel} className={cx("text-xs", muted, "hover:underline")}>Cancel</button>
-            )}
-          </div>
-          <div className="px-4 pb-4 space-y-3">
-            {/* Scope type */}
-            <div className="mt-3">
-              <div className={cx("text-xs font-medium mb-1.5", muted)}>Scope type</div>
-              <div className={cx("flex gap-0.5 rounded-md p-0.5 border", dark ? "bg-gray-700 border-gray-600" : "bg-slate-100 border-slate-200")}>
-                {SCOPE_TYPES.map(s => (
-                  <button key={s.id} onClick={() => { setScopeType(s.id); setTarget(""); }}
-                    className={cx("flex-1 py-1 text-xs font-semibold rounded transition-colors",
-                      scopeType === s.id ? "bg-blue-600 text-white" : (dark ? "text-gray-400 hover:bg-gray-600" : "text-slate-600 hover:bg-white"))}>
-                    {s.label}
-                  </button>
-                ))}
-              </div>
-            </div>
-            {/* Target */}
-            <div>
-              <div className={cx("text-xs font-medium mb-1.5", muted)}>Target ({SCOPE_TYPES.find(s => s.id === scopeType)?.label})</div>
-              <select value={target} onChange={e => setTarget(e.target.value)} className={sel}>
-                <option value="">— Select —</option>
-                {targetOptions.map(o => <option key={o} value={o}>{o}</option>)}
-              </select>
-            </div>
-            {/* Threshold fields */}
-            <ThresholdFields values={values} onChange={setValues} currency={currency} />
-            {error && <div className="text-xs text-red-500">{error}</div>}
-            <div className="flex justify-end">
-              <button onClick={save}
-                className="text-sm px-4 py-2 rounded-lg bg-blue-600 text-white font-medium hover:bg-blue-700 transition-colors">
-                {saved ? "✓ Saved" : (editingOverride ? "Update override" : "Save override")}
-              </button>
-            </div>
-          </div>
-        </div>
-      );
-    }
-
-    // ── Small icon buttons used in the drill-down list ──────────────────────
-    function IconBtn({ title, onClick, children, danger, muted: isMuted }) {
-      const dark = useDark();
-      return (
-        <button title={title} onClick={onClick}
-          className={cx("w-7 h-7 flex items-center justify-center rounded-md transition-colors flex-shrink-0",
-            danger ? (dark ? "text-red-400 hover:bg-red-950" : "text-red-500 hover:bg-red-50")
-            : isMuted ? (dark ? "text-gray-600 hover:text-gray-400 hover:bg-gray-700" : "text-slate-300 hover:text-slate-500 hover:bg-slate-100")
-            : (dark ? "text-gray-400 hover:bg-gray-700 hover:text-gray-200" : "text-slate-500 hover:bg-slate-100 hover:text-slate-700")
-          )}>
-          {children}
-        </button>
-      );
-    }
-
-    // Inline edit form that expands below a row
-    function InlineThresholdEdit({ thresholdKey, initialValues, currency, onSave, onCancel }) {
-      const dark = useDark();
-      const [values, setValues] = useState({ ...initialValues });
-      const [saved, setSaved]   = useState(false);
-      const save = () => {
-        kv.set(thresholdKey, { ...values, enabled: true });
-        setSaved(true);
-        setTimeout(() => { setSaved(false); onSave(); }, 800);
-      };
-      const bg  = dark ? "bg-gray-900 border-gray-700" : "bg-slate-50 border-slate-200";
-      return (
-        <div className={cx("px-4 py-3 border-t", bg, dark ? "border-gray-700" : "border-slate-100")}>
-          <ThresholdFields values={values} onChange={setValues} currency={currency} />
-          <div className="flex justify-between mt-3">
-            <button onClick={onCancel}
-              className={cx("text-xs px-3 py-1.5 rounded border font-medium",
-                dark ? "border-gray-600 text-gray-400 hover:bg-gray-700" : "border-slate-200 text-slate-600 hover:bg-slate-50")}>
-              Cancel
-            </button>
-            <button onClick={save}
-              className="text-xs px-3 py-1.5 rounded bg-blue-600 text-white font-medium hover:bg-blue-700">
-              {saved ? "✓ Saved" : "Save override"}
-            </button>
-          </div>
-        </div>
-      );
-    }
-
-    // A single row in the drill-down list
-    function DrillRow({ item, currency, editingKey, onEdit, onReset, onDrill, dark }) {
-      const isEditing = editingKey === item.key;
-      const changePct = item.changePct;
-      const overrideActive = item.hasOverride;
-      const text  = dark ? "text-gray-100" : "text-slate-900";
-      const muted = dark ? "text-gray-500" : "text-slate-400";
-      const divider = dark ? "border-gray-700" : "border-slate-100";
-      const rowBg   = dark ? "hover:bg-gray-700" : "hover:bg-slate-50";
-
-      // Threshold display: compact "A$50 | 25%"
-      const t = item.threshold;
-      const threshStr = `${fmt(t.absoluteMonthly, currency)} | ${t.momPct}%`;
-      const tierStr = t.tierAbsolute === t.tierPct ? t.tierAbsolute : `${t.tierAbsolute}/${t.tierPct}`;
-
-      return (
-        <>
-          <div className={cx("flex items-center gap-2 px-3 py-2.5 border-b transition-colors", divider, rowBg)}>
-            {/* Drill arrow (only on service/rg level) */}
-            {onDrill && (
-              <button onClick={onDrill} className={cx("flex-shrink-0", muted, "hover:text-blue-500")}>
-                <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.5" strokeLinecap="round"><path d="M9 18l6-6-6-6"/></svg>
-              </button>
-            )}
-
-            {/* Name */}
-            <div className="flex-1 min-w-0">
-              <div className={cx("text-xs font-semibold truncate", text)} title={item.name}>{item.name}</div>
-              <div className={cx("text-xs truncate", muted)}>
-                {threshStr}
-                <span className={cx("ml-1.5 text-xs", tierStr === "watch" ? "text-blue-500" : tierStr === "warning" ? "text-amber-500" : "text-red-500")}>
-                  {tierStr}
-                </span>
-                {overrideActive && <span className="ml-1.5 text-blue-400">●</span>}
-              </div>
-            </div>
-
-            {/* Cost */}
-            <div className="text-right flex-shrink-0">
-              <div className={cx("text-xs font-bold tabular-nums", text)}>{fmt(item.cost, currency)}</div>
-              {changePct != null && (
-                <div className={cx("text-xs tabular-nums font-medium",
-                  changePct > 10 ? (dark ? "text-rose-400" : "text-rose-600")
-                  : changePct < -5 ? (dark ? "text-emerald-400" : "text-emerald-600")
-                  : muted)}>
-                  {changePct > 0 ? "▲" : "▼"}{Math.abs(changePct).toFixed(0)}%
-                </div>
-              )}
-            </div>
-
-            {/* Action icons */}
-            <div className="flex items-center gap-0.5 flex-shrink-0">
-              <IconBtn title="Set threshold" onClick={() => onEdit(item)}>
-                <svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round"><path d="M11 4H4a2 2 0 0 0-2 2v14a2 2 0 0 0 2 2h14a2 2 0 0 0 2-2v-7"/><path d="M18.5 2.5a2.121 2.121 0 0 1 3 3L12 15l-4 1 1-4 9.5-9.5z"/></svg>
-              </IconBtn>
-              <IconBtn title="Reset to global default" onClick={() => onReset(item)} isMuted={!overrideActive} danger={false}>
-                <svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round"><path d="M3 12a9 9 0 1 0 9-9 9.75 9.75 0 0 0-6.74 2.74L3 8"/><path d="M3 3v5h5"/></svg>
-              </IconBtn>
-            </div>
-          </div>
-
-          {/* Inline edit form */}
-          {isEditing && (
-            <InlineThresholdEdit
-              thresholdKey={item.key}
-              initialValues={item.threshold}
-              currency={currency}
-              onSave={onEdit.bind(null, null)}
-              onCancel={() => onEdit(null)}
-            />
-          )}
-        </>
-      );
-    }
-
-    function AlertsTab({ records, currency, onResetBudgets }) {
-      const dark = useDark();
-      const [drillService, setDrillService] = useState(null);
-      const [editingKey, setEditingKey]     = useState(null);
-      const [refreshKey, setRefreshKey]     = useState(0);
-      const [showGlobal, setShowGlobal]     = useState(false);
-
-      const refresh = () => { setRefreshKey(k => k + 1); setEditingKey(null); };
-
-      const bg     = dark ? "bg-gray-800 border-gray-700" : "bg-white border-slate-200";
-      const hdr    = dark ? "text-gray-100" : "text-slate-900";
-      const muted  = dark ? "text-gray-400" : "text-slate-500";
-      const divider= dark ? "border-gray-700" : "border-slate-100";
-      const filBg  = dark ? "bg-gray-800" : "bg-white";
-
-      // Build rows for current drill level
-      const rows = useMemo(() => {
-        if (!records.length) return [];
-        const half = new Date(); half.setUTCDate(half.getUTCDate() - 15);
-        const halfIso = half.toISOString().slice(0, 10);
-        const map = {};
-
-        for (const r of records) {
-          const isService = drillService === null;
-          const groupKey  = isService ? r.service : r.resourceName;
-          if (!isService && r.service !== drillService) continue;
-          if (!map[groupKey]) map[groupKey] = {
-            name: groupKey, service: r.service, rg: r.resourceGroup,
-            location: r.location, cost: 0, recent: 0, prior: 0, resourceId: r.resourceId
-          };
-          map[groupKey].cost += r.cost;
-          if (r.date >= halfIso) map[groupKey].recent += r.cost;
-          else map[groupKey].prior += r.cost;
-        }
-
-        return Object.values(map).sort((a, b) => b.cost - a.cost).map(item => {
-          const isService = drillService === null;
-          const key = isService
-            ? `thresholds:service:${item.name}`
-            : `thresholds:resource:${item.name}`;
-          const rawThreshold = kv.get(key);
-          const threshold = rawThreshold ? JSON.parse(rawThreshold) : ensureGlobalThreshold();
-          return {
-            ...item,
-            key,
-            changePct: item.prior > 0.01 ? ((item.recent - item.prior) / item.prior) * 100 : null,
-            threshold,
-            hasOverride: rawThreshold !== null,
-          };
-        });
-      }, [records, drillService, refreshKey]);
-
-      const handleEdit = (item) => {
-        if (!item) { setEditingKey(null); return; }
-        setEditingKey(editingKey === item.key ? null : item.key);
-      };
-
-      const handleReset = (item) => {
-        kv.del(item.key);
-        refresh();
-      };
-
-      const totalAlertCount = rows.filter(r => r.hasOverride).length;
-
-      return (
-        <div className="space-y-3">
-          {/* Global defaults — collapsible */}
-          <div className={cx("rounded-xl border shadow-sm overflow-hidden", bg)}>
-            <button onClick={() => setShowGlobal(v => !v)}
-              className={cx("w-full flex items-center justify-between px-4 py-3 transition-colors text-left",
-                dark ? "hover:bg-gray-700" : "hover:bg-slate-50")}>
-              <div>
-                <span className={cx("text-sm font-semibold", hdr)}>Global defaults</span>
-                <span className={cx("text-xs ml-2", muted)}>applies to all unless overridden</span>
-              </div>
-              <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.5"
-                strokeLinecap="round" className={cx(muted, "transition-transform", showGlobal ? "" : "-rotate-90")}>
-                <path d="M6 9l6 6 6-6"/>
-              </svg>
-            </button>
-            {showGlobal && (
-              <div className={cx("border-t", divider)}>
-                <GlobalDefaultsSection currency={currency} onSaved={refresh} />
-              </div>
-            )}
-          </div>
-
-          {/* Drill-down list */}
-          <div className={cx("rounded-xl border shadow-sm overflow-hidden", bg)}>
-            {/* Header row: breadcrumb + reset budgets */}
-            <div className={cx("px-3 py-2.5 border-b flex items-center gap-2", divider)}>
-              {drillService ? (
-                <button onClick={() => { setDrillService(null); setEditingKey(null); }}
-                  className={cx("flex items-center gap-1 text-xs font-medium transition-colors",
-                    dark ? "text-blue-400 hover:text-blue-300" : "text-blue-600 hover:text-blue-700")}>
-                  <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.5" strokeLinecap="round"><path d="M15 18l-6-6 6-6"/></svg>
-                  All services
-                </button>
-              ) : null}
-              <span className={cx("text-xs font-semibold", hdr)}>
-                {drillService ? `${drillService} · resources` : "Services"}
-              </span>
-              <div className="ml-auto flex items-center gap-2">
-                {totalAlertCount > 0 && (
-                  <span className={cx("text-xs", muted)}>{totalAlertCount} override{totalAlertCount !== 1 ? "s" : ""}</span>
-                )}
-                {onResetBudgets && !drillService && (
-                  <button onClick={() => { if (confirm("Reset all budgets to 115% of current spend?")) { onResetBudgets(); setRefreshKey(k => k+1); }}}
-                    className={cx("text-xs px-2 py-1 rounded border transition-colors flex items-center gap-1",
-                      dark ? "border-gray-600 text-gray-400 hover:bg-gray-700" : "border-slate-200 text-slate-500 hover:bg-slate-50")}>
-                    <svg width="11" height="11" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round"><path d="M3 12a9 9 0 1 0 9-9 9.75 9.75 0 0 0-6.74 2.74L3 8"/><path d="M3 3v5h5"/></svg>
-                    Reset budgets
-                  </button>
-                )}
-              </div>
-            </div>
-
-            {/* Column headers */}
-            <div className={cx("flex items-center gap-2 px-3 py-1 border-b text-xs font-medium",
-              dark ? "bg-gray-900 border-gray-700 text-gray-500" : "bg-slate-50 border-slate-100 text-slate-400")}>
-              <div className="w-3 flex-shrink-0" />
-              <div className="flex-1">Name · Threshold</div>
-              <div className="w-16 text-right flex-shrink-0">Cost</div>
-              <div className="w-14 flex-shrink-0" />
-            </div>
-
-            {/* Rows */}
-            {records.length === 0 && (
-              <div className={cx("px-4 py-8 text-sm text-center", muted)}>
-                Load cost data first to configure thresholds.
-              </div>
-            )}
-            {rows.map((item, i) => (
-              <DrillRow key={i} item={item} currency={currency}
-                editingKey={editingKey} dark={dark}
-                onEdit={handleEdit}
-                onReset={handleReset}
-                onDrill={drillService === null ? () => { setDrillService(item.name); setEditingKey(null); } : null}
-              />
-            ))}
-          </div>
-        </div>
-      );
-    }
-
-    // Compact budget progress bar
-    function BudgetBar({ mtd, projected, budget, currency, dark, onSetBudget }) {
-      const muted0 = dark ? "text-gray-500" : "text-slate-400";
-      if (!budget || budget <= 0) {
-        return (
-          <button onClick={onSetBudget}
-            className={cx("w-full text-xs px-4 py-2 rounded-xl border border-dashed transition-colors text-left",
-              dark ? "border-gray-700 text-gray-600 hover:border-gray-500 hover:text-gray-400"
-                   : "border-slate-200 text-slate-400 hover:border-slate-300 hover:text-slate-500")}>
-            + Set a monthly budget to track spend against it
-          </button>
-        );
-      }
-      const pct = Math.min((mtd / budget) * 100, 100);
-      const projPct = Math.min((projected / budget) * 100, 110);
-      const overBudget = projected > budget;
-      const barColor = pct < 70 ? "#22c55e" : pct < 90 ? "#f59e0b" : "#ef4444";
-      const bg = dark ? "bg-gray-800 border-gray-700" : "bg-white border-slate-200";
-      const muted = dark ? "text-gray-500" : "text-slate-400";
-      const text  = dark ? "text-gray-200" : "text-slate-700";
-      return (
-        <div className={cx("rounded-xl border shadow-sm px-4 py-2.5", bg)}>
-          <div className="flex items-center justify-between mb-1.5 gap-2">
-            <span className={cx("text-xs font-medium", text)}>Monthly budget</span>
-            <span className={cx("text-xs tabular-nums", overBudget ? "text-rose-500 font-semibold" : muted)}>
-              {fmt(mtd, currency)} <span className={muted}>of</span> {fmt(budget, currency)}
-              {projected > mtd && <span className={muted}> · forecast {fmt(projected, currency)}</span>}
-            </span>
-          </div>
-          {/* Track */}
-          <div className={cx("relative h-1.5 rounded-full overflow-visible", dark ? "bg-gray-700" : "bg-slate-100")}>
-            {/* Actual spend */}
-            <div className="absolute top-0 left-0 h-full rounded-full transition-all duration-500"
-              style={{ width: `${pct}%`, background: barColor }} />
-            {/* Forecast marker (dashed line at projected %) */}
-            {projected > mtd && projPct <= 110 && (
-              <div className="absolute top-1/2 -translate-y-1/2 w-0.5 h-3 rounded-full bg-blue-400 opacity-70"
-                style={{ left: `${Math.min(projPct, 100)}%` }} title={`Forecast: ${fmt(projected, currency)}`} />
-            )}
-          </div>
-          {overBudget && (
-            <div className="text-xs text-rose-500 mt-1 font-medium">Over budget by {fmt(projected - budget, currency)}</div>
-          )}
-        </div>
-      );
-    }
-
-    // =========================================================================
-    // DASHBOARD (Pass 2+3: tabs, insight cards, alerts tab)
+    // Main Dashboard
     // =========================================================================
     function Dashboard({ selected, allSubs, onChangeSubs, onSignOut }) {
-      const [days, setDays]         = useState(30);
-      const [data, setData]         = useState(null);
-      const [loading, setLoading]   = useState(true);
+      const [days, setDays]     = useState(30);
+      const [data, setData]     = useState(null);
+      const [loading, setLoading] = useState(true);
       const [progress, setProgress] = useState("");
-      const [error, setError]       = useState(null);
+      const [error, setError]   = useState(null);
       const [testMode, setTestMode] = useState(false);
-      const [dark, setDark]         = useState(() => { try { return localStorage.getItem("dark") === "1"; } catch { return false; } });
-      const [activeTab, setActiveTab] = useState("home");
+      const [dark, setDark] = useState(() => {
+        try { return localStorage.getItem("dark") === "1"; } catch { return false; }
+      });
 
-      // Shared grouping
+      // Shared grouping — controls time-series, bar chart AND movers
       const [groupId, setGroupId] = useState("service");
-      const [bucket, setBucket]   = useState(() => defaultBucket(30));
-      const [style, setStyle]     = useState("stacked");
 
+      // Time series controls
+      const [bucket, setBucket] = useState(() => defaultBucket(30));
+      const [style, setStyle]   = useState("stacked");
+
+      // When days changes reset to widest sensible bucket
       useEffect(() => { setBucket(defaultBucket(days)); }, [days]);
-
-      // metricsData: { [resourceName]: { avgCpu7d, avgNetwork7d } }
-      // Populated from test data immediately, or from Monitor API after cost load.
-      const [metricsData, setMetricsData]   = useState({});
-      const [metricsStatus, setMetricsStatus] = useState(""); // "" | "loading" | "done" | "error"
 
       const load = useCallback(async (force = false) => {
         if (testMode) {
-          const td = generateTestData(days);
-          setData(td);
-          setMetricsData(td.metrics || {});
+          setData(generateTestData(days));
           setLoading(false);
           return;
         }
-        setError(null); setLoading(true); setProgress("Loading…");
-        setMetricsData({}); setMetricsStatus("");
+        setError(null);
+        setLoading(true);
+        setProgress("Loading…");
         try {
           const result = await getCostData(selected, allSubs, days, msg => setProgress(msg), force);
           setData(result);
-          initializeResourceBudgets(result.records, false); // auto-set resource budgets on first load
-        } catch (e) { setError(e.message); }
-        finally { setLoading(false); setProgress(""); }
+        } catch (e) {
+          setError(e.message);
+        } finally {
+          setLoading(false);
+          setProgress("");
+        }
       }, [selected, allSubs, days, testMode]);
-
-      // After cost data loads (real mode), fetch VM metrics in background
-      useEffect(() => {
-        if (!data || data.isTest || metricsStatus === "loading" || metricsStatus === "done") return;
-        const vms = data.records.filter(r => r.service === "Microsoft.Compute" && r.resourceId);
-        if (vms.length === 0) return;
-        setMetricsStatus("loading");
-        (async () => {
-          try {
-            const at = await ensureValidToken();
-            const m  = await fetchAllVmMetrics(data.records, at,
-              msg => setProgress(msg));
-            setMetricsData(m);
-            setMetricsStatus("done");
-          } catch (e) {
-            console.warn("Metrics fetch failed:", e);
-            setMetricsStatus("error");
-          } finally { setProgress(""); }
-        })();
-      }, [data]);
 
       useEffect(() => { load(false); }, [load]);
 
+      // Toggle test mode — regenerate immediately
       const toggleTestMode = () => {
         const next = !testMode;
         setTestMode(next);
-        if (next) { const td = generateTestData(days); setData(td); setMetricsData(td.metrics||{}); initializeResourceBudgets(td.records, false); setLoading(false); }
+        if (next) { setData(generateTestData(days)); setLoading(false); }
         else { setData(null); setLoading(true); }
       };
 
-      const stats    = useMemo(() => data ? calcStats(data.records, days) : null, [data, days]);
+      const stats   = useMemo(() => data ? calcStats(data.records, days) : null, [data, days]);
       const cacheAge = data ? Math.round((Date.now() - data.fetchedAt) / 60000) : 0;
       const groupOpt = GROUP_OPTS.find(o => o.id === groupId) || GROUP_OPTS[0];
 
-      const alerts = useMemo(() => {
-        if (!data || !data.records.length) return [];
-        ensureGlobalThreshold();
-        return runIntelligence(data.records, metricsData, days);
-      }, [data, metricsData, days]);
-
-      const forecast = useMemo(() => data ? projectMonthEnd(data.records, data.currency) : null, [data]);
-      // Re-read monthly budget reactively (re-evaluates when alerts change since
-      // threshold saves trigger a re-run of runIntelligence).
-      // Total budget = sum of all per-resource absoluteMonthly thresholds (auto-calculated)
-      const totalBudget = useMemo(() =>
-        data ? computeTotalBudget(data.records) : 0,
-      [data, alerts]); // alerts dep ensures recompute after threshold saves
-
-      // Dark mode class helpers
-      const bg     = dark ? "bg-gray-900"  : "bg-slate-50";
-      const hdrBg  = dark ? "bg-gray-900 border-gray-700"  : "bg-white border-slate-200";
-      const filBg  = dark ? "bg-gray-800 border-gray-700"  : "bg-slate-50 border-slate-100";
-      const segBg  = dark ? "bg-gray-700 border-gray-600"  : "bg-white border-slate-200";
-      const segAct = dark ? "bg-gray-500 text-white"        : "bg-slate-900 text-white";
+      // Dark mode classes
+      const bg    = dark ? "bg-gray-900" : "bg-slate-50";
+      const hdrBg = dark ? "bg-gray-900 border-gray-700" : "bg-white border-slate-200";
+      const filBg = dark ? "bg-gray-800 border-gray-700" : "bg-slate-50 border-slate-100";
+      const segBg = dark ? "bg-gray-700 border-gray-600" : "bg-white border-slate-200";
+      const segAct = dark ? "bg-gray-500 text-white" : "bg-slate-900 text-white";
       const segIn  = dark ? "text-gray-400 hover:bg-gray-600" : "text-slate-500 hover:bg-slate-100";
       const grpAct = "bg-blue-600 text-white";
       const grpIn  = dark ? "text-gray-400 hover:bg-gray-600" : "text-slate-500 hover:bg-slate-100";
-      const textMain = dark ? "text-gray-100" : "text-slate-900";
-      const textMuted= dark ? "text-gray-500" : "text-slate-500";
 
       return (
         <DarkCtx.Provider value={dark}>
         <div className={cx("min-h-screen transition-colors duration-200", bg)}>
 
-          {/* ── Sticky header ────────────────────────────────────────────────── */}
+          {/* ── Top bar ─────────────────────────────────────────────────────── */}
           <div className={cx("border-b sticky top-0 z-20 shadow-sm", hdrBg)}>
-
-            {/* Row 1: logo + actions */}
             <div className="max-w-5xl mx-auto px-4 py-2.5 flex items-center justify-between gap-2">
               <div className="flex items-center gap-2">
                 <svg width="18" height="18" fill="none" stroke="#3b82f6" strokeWidth="2" viewBox="0 0 24 24">
                   <path d="M18 10h-1.26A8 8 0 1 0 9 20h9a5 5 0 0 0 0-10z"/>
                 </svg>
-                <span className={cx("font-semibold text-sm", textMain)}>Azure Cost</span>
+                <span className={cx("font-semibold text-sm", dark ? "text-gray-100" : "text-slate-900")}>Azure Cost</span>
                 {data && data.isTest && (
                   <span className="text-xs bg-amber-100 text-amber-700 px-1.5 py-0.5 rounded font-medium">TEST</span>
                 )}
               </div>
               <div className="flex items-center gap-1.5">
+                {/* Dark mode toggle */}
                 <button onClick={() => { const n = !dark; setDark(n); try { localStorage.setItem("dark", n?"1":"0"); } catch {} }}
-                  className={cx("w-7 h-7 flex items-center justify-center rounded-md text-base transition-colors",
+                  className={cx("w-7 h-7 flex items-center justify-center rounded-md text-lg transition-colors",
                     dark ? "bg-gray-700 hover:bg-gray-600" : "bg-slate-100 hover:bg-slate-200")}>
                   {dark ? "☀️" : "🌙"}
                 </button>
@@ -2683,229 +1123,115 @@
                              : "border-slate-200 text-slate-500 hover:bg-slate-50")}>
                   {testMode ? "Test data" : "Test"}
                 </button>
-                <button onClick={onChangeSubs}
-                  className={cx("text-xs px-2 py-1 rounded border font-medium transition-colors",
-                    dark ? "border-gray-600 text-gray-400 hover:bg-gray-700" : "border-slate-200 text-slate-600 hover:bg-slate-50")}>
+                <button onClick={onChangeSubs} className={cx("text-xs px-2 py-1 rounded border font-medium transition-colors",
+                  dark ? "border-gray-600 text-gray-400 hover:bg-gray-700" : "border-slate-200 text-slate-600 hover:bg-slate-50")}>
                   Subs
                 </button>
-                <button onClick={onSignOut}
-                  className={cx("text-xs px-2 py-1 rounded font-medium transition-colors",
-                    dark ? "text-gray-500 hover:bg-gray-700" : "text-slate-400 hover:bg-slate-100")}>
+                <button onClick={onSignOut} className={cx("text-xs px-2 py-1 rounded font-medium transition-colors",
+                  dark ? "text-gray-500 hover:bg-gray-700" : "text-slate-400 hover:bg-slate-100")}>
                   Out
                 </button>
               </div>
             </div>
 
-            {/* Filter bar — Home tab only */}
-            {activeTab === "home" && (
-              <div className={cx("border-t px-4 py-2 space-y-2", filBg)}>
-                <div className="flex items-center gap-2">
-                  <div className={cx("flex gap-0.5 rounded-md p-0.5 border flex-shrink-0", segBg)}>
-                    {[7, 30, 90].map(n => (
-                      <button key={n} onClick={() => setDays(n)}
-                        className={cx("px-2.5 py-1 text-xs font-semibold rounded transition-colors", days === n ? segAct : segIn)}>
-                        {n}d
-                      </button>
-                    ))}
-                  </div>
-                  <div className="flex-1" />
-                  {data && (
-                    <span className={cx("text-xs flex-shrink-0 hidden sm:block", textMuted)}>
-                      {data.isTest ? "Test" : data.fromCache ? `${cacheAge}m ago` : "Fresh"} · {data.records.length.toLocaleString()}
-                    </span>
-                  )}
-                  {/* Currency badge */}
-                  {data && (
-                    <span className={cx("text-xs px-1.5 py-0.5 rounded font-mono font-medium flex-shrink-0",
-                      dark ? "bg-gray-700 text-gray-400" : "bg-slate-100 text-slate-500")}>
-                      {data.currency}
-                    </span>
-                  )}
-                  <button onClick={() => load(true)} disabled={loading}
-                    className={cx("text-xs px-2 py-1 rounded border font-medium flex items-center gap-1 transition-colors",
-                      dark ? "border-gray-600 text-gray-400 hover:bg-gray-700" : "border-slate-200 text-slate-600 hover:bg-slate-50")}>
-                    {loading ? <Spinner size={11} /> : "↻"}
-                  </button>
-                </div>
-                <div className={cx("flex gap-0.5 rounded-md p-0.5 border w-full", segBg)}>
-                  {GROUP_OPTS.map(o => (
-                    <button key={o.id} onClick={() => setGroupId(o.id)}
-                      className={cx("flex-1 py-1 text-xs font-semibold rounded transition-colors text-center",
-                        groupId === o.id ? grpAct : grpIn)}>
-                      {o.label}
+            {/* ── Filter bar: 2 rows, no overflow ──────────────────────────── */}
+            <div className={cx("border-t px-4 py-2 space-y-2", filBg)}>
+              {/* Row 1: date range + status + refresh */}
+              <div className="flex items-center gap-2">
+                <div className={cx("flex gap-0.5 rounded-md p-0.5 border flex-shrink-0", segBg)}>
+                  {[7, 30, 90].map(n => (
+                    <button key={n} onClick={() => setDays(n)}
+                      className={cx("px-2.5 py-1 text-xs font-semibold rounded transition-colors",
+                        days === n ? segAct : segIn)}>
+                      {n}d
                     </button>
                   ))}
                 </div>
+                <div className="flex-1" />
+                {data && (
+                  <span className={cx("text-xs flex-shrink-0 hidden sm:block", dark ? "text-gray-500" : "text-slate-400")}>
+                    {data.isTest ? "Test" : data.fromCache ? `${cacheAge}m ago` : "Fresh"} · {data.records.length.toLocaleString()}
+                  </span>
+                )}
+                <button onClick={() => load(true)} disabled={loading}
+                  className={cx("text-xs px-2 py-1 rounded border font-medium flex items-center gap-1 transition-colors",
+                    dark ? "border-gray-600 text-gray-400 hover:bg-gray-700" : "border-slate-200 text-slate-600 hover:bg-slate-50")}>
+                  {loading ? <Spinner size={11} /> : "↻"} Refresh
+                </button>
               </div>
-            )}
+              {/* Row 2: grouping (full width, wraps naturally) */}
+              <div className={cx("flex gap-0.5 rounded-md p-0.5 border w-full", segBg)}>
+                {GROUP_OPTS.map(o => (
+                  <button key={o.id} onClick={() => setGroupId(o.id)}
+                    className={cx("flex-1 py-1 text-xs font-semibold rounded transition-colors text-center",
+                      groupId === o.id ? grpAct : grpIn)}>
+                    {o.label}
+                  </button>
+                ))}
+              </div>
+            </div>
           </div>
 
-          {/* ── Page content ──────────────────────────────────────────────────── */}
-          <div className="max-w-5xl mx-auto px-4 py-4 pb-24 space-y-4">
+          {/* ── Page content ─────────────────────────────────────────────────── */}
+          <div className="max-w-5xl mx-auto px-4 py-4 space-y-4">
+            <ErrMsg msg={error} />
 
-            {/* ── ALERTS TAB (insight cards) ──────────────────────────────── */}
-            {activeTab === "alerts" && (
-              <div className="space-y-4">
-                {!data && (
-                  <div className={cx("rounded-xl border p-8 text-center text-sm",
-                    dark ? "bg-gray-800 border-gray-700 text-gray-500" : "bg-white border-slate-200 text-slate-400")}>
-                    Load data first to see alerts.
+            {/* Loading */}
+            {loading && (
+              <Card className="p-10">
+                <div className="flex flex-col items-center gap-3">
+                  <Spinner size={28} className="text-blue-400" />
+                  <div className={cx("text-sm font-medium", dark ? "text-gray-300" : "text-slate-600")}>{progress}</div>
+                  <div className={cx("text-xs text-center max-w-xs", dark ? "text-gray-500" : "text-slate-400")}>
+                    First load may take 15–30s — PAYG API paginates 1,000 records at a time.
                   </div>
-                )}
-                {data && alerts.length === 0 && (
-                  <div className={cx("rounded-xl border p-8 text-center",
-                    dark ? "bg-gray-800 border-gray-700" : "bg-white border-slate-200")}>
-                    <div className="text-3xl mb-2">✅</div>
-                    <h3 className={cx("font-semibold", dark ? "text-gray-200" : "text-slate-700")}>No alerts</h3>
-                    <p className={cx("text-sm mt-1", dark ? "text-gray-500" : "text-slate-500")}>All resources within expected cost ranges.</p>
-                  </div>
-                )}
-                {data && alerts.length > 0 && <InsightCards alerts={alerts} dark={dark} />}
-              </div>
+                </div>
+              </Card>
             )}
 
-            {/* ── SETTINGS TAB (thresholds) ───────────────────────────────────── */}
-            {activeTab === "settings" && (
-              <AlertsTab records={data?.records || []} currency={data?.currency || "USD"} onResetBudgets={() => { if (data) { initializeResourceBudgets(data.records, true); load(false); }}} />
+            {/* Empty */}
+            {!loading && data && data.records.length === 0 && (
+              <Card className="p-8 text-center">
+                <div className="text-3xl mb-2">🔍</div>
+                <h3 className={cx("font-semibold", dark ? "text-gray-200" : "text-slate-700")}>No cost data found</h3>
+                <p className={cx("text-sm mt-1", dark ? "text-gray-500" : "text-slate-500")}>
+                  No usage records in the last {days} days. Try a wider range or switch to test data.
+                </p>
+              </Card>
             )}
 
-            {/* ── HOME TAB ───────────────────────────────────────────────────── */}
-            {activeTab === "home" && (
+            {/* Dashboard */}
+            {!loading && data && data.records.length > 0 && stats && (
               <>
-                <ErrMsg msg={error} />
+                {/* KPI row — compact single row */}
+                <div className="grid grid-cols-4 gap-2" style={{marginBottom: 0}}>
+                  <KpiCard label={`${days}d total`} value={fmt(stats.total, data.currency)} />
+                  <KpiCard label="Daily avg"  value={fmt(stats.avgDaily, data.currency)} />
+                  <KpiCard label="Peak day"   value={fmt(stats.peakDay.cost, data.currency)} sub={stats.peakDay.date ? stats.peakDay.date.slice(5) : ""} />
+                  <KpiCard label="Trend"
+                    value={stats.trendPct != null ? `${stats.trendPct > 0 ? "+" : ""}${stats.trendPct.toFixed(0)}%` : "N/A"}
+                    trend={stats.trendPct} />
+                </div>
 
-                {loading && (
-                  <div className={cx("rounded-xl border shadow-sm p-10 flex flex-col items-center gap-3",
-                    dark ? "bg-gray-800 border-gray-700" : "bg-white border-slate-200")}>
-                    <Spinner size={28} className="text-blue-400" />
-                    <div className={cx("text-sm font-medium", dark ? "text-gray-300" : "text-slate-600")}>{progress}</div>
-                    <div className={cx("text-xs text-center max-w-xs", textMuted)}>
-                      First load may take 15–30s for PAYG subscriptions.
-                    </div>
-                  </div>
-                )}
+                {/* Time series */}
+                <TimeSeriesChart
+                  records={data.records} currency={data.currency}
+                  from={data.from} to={data.to} days={days}
+                  groupOpt={groupOpt}
+                  bucket={bucket} setBucket={setBucket}
+                  style={style} setStyle={setStyle}
+                />
 
-                {!loading && data && data.records.length === 0 && (
-                  <div className={cx("rounded-xl border shadow-sm p-8 text-center",
-                    dark ? "bg-gray-800 border-gray-700" : "bg-white border-slate-200")}>
-                    <div className="text-3xl mb-2">🔍</div>
-                    <h3 className={cx("font-semibold", dark ? "text-gray-200" : "text-slate-700")}>No cost data found</h3>
-                    <p className={cx("text-sm mt-1", textMuted)}>Try a wider range or switch to test data.</p>
-                  </div>
-                )}
+                {/* Top movers — directly below time series */}
+                <MoversCard records={data.records} days={days} currency={data.currency} groupOpt={groupOpt} />
 
-                {!loading && data && data.records.length > 0 && stats && (
-                  <>
-                    {/* KPI row — compact, currency shown once in header */}
-                    <div className="grid grid-cols-4 gap-1.5">
-                      <KpiCard label={`${days}d total`} value={fmtKpi(stats.total, data.currency)} />
-                      <KpiCard label="Avg/day" value={fmtKpi(stats.avgDaily, data.currency)} />
-                      <KpiCard label="Peak day" value={fmtKpi(stats.peakDay.cost, data.currency)} />
-                      <KpiCard label="Forecast"
-                        value={forecast ? fmtKpi(forecast.projected, data.currency) : "—"}
-                        trend={forecast && forecast.mtd > 0
-                          ? ((forecast.projected - forecast.mtd / Math.max(forecast.daysInMonth - forecast.daysLeft, 1) * forecast.daysInMonth)
-                             / (forecast.mtd / Math.max(forecast.daysInMonth - forecast.daysLeft, 1) * forecast.daysInMonth)) * 100
-                          : null}
-                      />
-                    </div>
+                {/* Bar chart breakdown */}
+                <GroupChart records={data.records} currency={data.currency} groupOpt={groupOpt} />
 
-                    {/* Budget progress bar */}
-                    {forecast && (
-                      <BudgetBar
-                        mtd={forecast.mtd}
-                        projected={forecast.projected}
-                        budget={totalBudget}
-                        currency={data.currency}
-                        dark={dark}
-                        onSetBudget={() => setActiveTab("alerts")}
-                      />
-                    )}
-
-                    {/* Charts */}
-                    <TimeSeriesChart
-                      records={data.records} currency={data.currency}
-                      from={data.from} to={data.to} days={days}
-                      groupOpt={groupOpt} bucket={bucket} setBucket={setBucket}
-                      style={style} setStyle={setStyle}
-                      forecast={forecast}
-                      alerts={alerts}
-                      budget={totalBudget}
-                    />
-                    <MoversCard records={data.records} days={days} currency={data.currency} groupOpt={groupOpt} />
-                    <GroupChart records={data.records} currency={data.currency} groupOpt={groupOpt} />
-                    <DetailTable records={data.records} currency={data.currency} total={stats.total} groupOpt={groupOpt} />
-                  </>
-                )}
+                {/* Detail table */}
+                <DetailTable records={data.records} currency={data.currency} total={stats.total} groupOpt={groupOpt} />
               </>
             )}
-          </div>
-          {/* ── Bottom tab bar — 3 tabs ──────────────────────────────────────── */}
-          <div className={cx(
-            "fixed bottom-0 left-0 right-0 z-30 border-t",
-            dark ? "bg-gray-900 border-gray-700" : "bg-white border-slate-200"
-          )} style={{ paddingBottom: "env(safe-area-inset-bottom, 0px)" }}>
-            <div className="max-w-5xl mx-auto flex">
-              {[
-                {
-                  id: "home", label: "Dashboard", badge: 0,
-                  icon: (on) => (
-                    <svg width="22" height="22" viewBox="0 0 24 24" fill="none"
-                      stroke={on ? "#3b82f6" : (dark ? "#6b7280" : "#94a3b8")}
-                      strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
-                      <rect x="3" y="3" width="7" height="7" rx="1"/><rect x="14" y="3" width="7" height="7" rx="1"/>
-                      <rect x="3" y="14" width="7" height="7" rx="1"/><rect x="14" y="14" width="7" height="7" rx="1"/>
-                    </svg>
-                  )
-                },
-                {
-                  id: "alerts", label: "Alerts",
-                  badge: alerts.filter(a => a.tier === "critical" || a.tier === "warning").length,
-                  icon: (on) => (
-                    <svg width="22" height="22" viewBox="0 0 24 24" fill="none"
-                      stroke={on ? "#3b82f6" : (dark ? "#6b7280" : "#94a3b8")}
-                      strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
-                      <path d="M18 8A6 6 0 0 0 6 8c0 7-3 9-3 9h18s-3-2-3-9"/>
-                      <path d="M13.73 21a2 2 0 0 1-3.46 0"/>
-                    </svg>
-                  )
-                },
-                {
-                  id: "settings", label: "Settings", badge: 0,
-                  icon: (on) => (
-                    <svg width="22" height="22" viewBox="0 0 24 24" fill="none"
-                      stroke={on ? "#3b82f6" : (dark ? "#6b7280" : "#94a3b8")}
-                      strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
-                      <line x1="4" y1="6" x2="20" y2="6"/>
-                      <line x1="4" y1="12" x2="20" y2="12"/>
-                      <line x1="4" y1="18" x2="20" y2="18"/>
-                      <circle cx="14" cy="6" r="2" fill={on ? "#3b82f6" : (dark ? "#6b7280" : "#94a3b8")} stroke="none"/>
-                      <circle cx="8" cy="12" r="2" fill={on ? "#3b82f6" : (dark ? "#6b7280" : "#94a3b8")} stroke="none"/>
-                      <circle cx="16" cy="18" r="2" fill={on ? "#3b82f6" : (dark ? "#6b7280" : "#94a3b8")} stroke="none"/>
-                    </svg>
-                  )
-                }
-              ].map(tab => {
-                const active = activeTab === tab.id;
-                return (
-                  <button key={tab.id} onClick={() => setActiveTab(tab.id)}
-                    className="flex-1 flex flex-col items-center justify-center py-2.5 gap-0.5 relative transition-colors">
-                    <div className="relative">
-                      {tab.icon(active)}
-                      {tab.badge > 0 && (
-                        <span className="absolute -top-1 -right-1 min-w-[16px] h-4 flex items-center justify-center rounded-full bg-red-500 text-white text-xs font-bold px-0.5 leading-none">
-                          {tab.badge}
-                        </span>
-                      )}
-                    </div>
-                    <span className={cx("text-xs font-medium transition-colors",
-                      active ? "text-blue-500" : (dark ? "text-gray-500" : "text-slate-400"))}>
-                      {tab.label}
-                    </span>
-                  </button>
-                );
-              })}
-            </div>
           </div>
         </div>
         </DarkCtx.Provider>
