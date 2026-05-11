@@ -529,57 +529,72 @@
     // Each group gets a daily rate computed from its recent bucketed values.
     // A bridge point is added to the last actual row so lines connect visually.
     // Future rows extend to end of current month (day/week) or next month (month bucket).
-    function addForecastToSeries(gs, bucket) {
+    function addForecastToSeries(gs, bucket, method) {
+      // method: "holt" | "adaptive"
       if (!gs.rows.length) return gs;
       const today = new Date();
       const todayIso = today.toISOString().slice(0, 10);
 
-      // Scale factor: convert bucketed value → daily rate
-      const toDaily = { day: 1, week: 7, month: 30 };
-      const toDB    = toDaily[bucket] || 1;
+      // Scale factor: bucketed value ÷ toDB = daily rate
+      const toDB = { day: 1, week: 7, month: 30 }[bucket] || 1;
 
-      // Compute daily rate per group from last 7 available bucketed rows
-      const dailyRate = {};
+      // Forecast end date
+      const endDate = bucket === "month"
+        ? new Date(today.getFullYear(), today.getMonth() + 2, 0)
+        : new Date(today.getFullYear(), today.getMonth() + 1, 0);
+
+      // Total future days to project
+      const daysToEnd = Math.max(1, Math.ceil((endDate - today) / 86400000));
+
+      // For each group: get recent bucketed values, normalize to daily, run forecast
+      const groupForecastDaily = {};
       for (const g of gs.groupNames) {
-        const vals = gs.rows
+        const bucketedVals = gs.rows
           .filter(r => r.key <= todayIso && r[g] != null)
-          .slice(-7)
+          .slice(-14)
           .map(r => (r[g] || 0) / toDB);
-        dailyRate[g] = computeSmartDailyRate(vals);
+
+        groupForecastDaily[g] = (method === "adaptive")
+          ? forecastAdaptive(bucketedVals, daysToEnd)
+          : forecastHolt(bucketedVals, daysToEnd);
       }
 
-      // Find last actual row index (latest row at or before today)
+      // Bridge point: set _f on last actual row to connect lines visually
       let bridgeIdx = -1;
       for (let i = gs.rows.length - 1; i >= 0; i--) {
         if (gs.rows[i].key <= todayIso) { bridgeIdx = i; break; }
       }
-
-      // Add bridge point on the last actual row so dashed line starts there
       if (bridgeIdx >= 0) {
         const bridge = gs.rows[bridgeIdx];
         for (const g of gs.groupNames) {
-          bridge[`${g}_f`] = bridge[g] != null ? bridge[g] : dailyRate[g] * toDB;
+          bridge[`${g}_f`] = bridge[g] != null ? bridge[g] : (groupForecastDaily[g][0] || 0) * toDB;
         }
       }
 
-      // Forecast end date
-      const endDate = bucket === "month"
-        ? new Date(today.getFullYear(), today.getMonth() + 2, 0)   // end of next month
-        : new Date(today.getFullYear(), today.getMonth() + 1, 0);  // end of current month
-      const endIso  = endDate.toISOString().slice(0, 10);
+      // Build future daily entries then bucket them
+      const futureDailyByBucket = {};
+      for (let d = 1; d <= daysToEnd; d++) {
+        const dt  = new Date(today.getFullYear(), today.getMonth(), today.getDate() + d);
+        const iso = dt.toISOString().slice(0, 10);
+        const { key, label } = bucketDate(iso, bucket);
+        if (!futureDailyByBucket[key]) futureDailyByBucket[key] = { label, sums: {}, days: 0 };
+        futureDailyByBucket[key].days++;
+        for (const g of gs.groupNames) {
+          futureDailyByBucket[key].sums[g] = (futureDailyByBucket[key].sums[g] || 0)
+            + (groupForecastDaily[g][d - 1] || 0);
+        }
+      }
 
-      // Generate future rows
+      // Convert to rows, skipping buckets already in the series (actuals cover them)
       const seen = new Set(gs.rows.map(r => r.key));
       const futureRows = [];
-      for (const iso of iterDays(todayIso, endIso)) {
-        if (iso <= todayIso) continue;
-        const { key, label } = bucketDate(iso, bucket);
+      for (const [key, data] of Object.entries(futureDailyByBucket)) {
         if (seen.has(key)) continue;
         seen.add(key);
-        const row = { key, label };
+        const row = { key, label: data.label };
         for (const g of gs.groupNames) {
           row[g] = null;
-          row[`${g}_f`] = parseFloat((dailyRate[g] * toDB).toFixed(4));
+          row[`${g}_f`] = parseFloat(Math.max(0, data.sums[g] || 0).toFixed(4));
         }
         futureRows.push(row);
       }
@@ -864,6 +879,87 @@
 
     // Project month-end spend from records.
     // Compute a smart daily rate that handles sudden resource shutoffs and spikes.
+    // ── Forecast Algorithm A: Damped Holt's Linear Trend ─────────────────────
+    // Tracks level (L) and trend (T) separately with smoothing.
+    // phi<1 damps the trend so it flattens over time rather than diverging.
+    // Returns array of daysAhead daily values.
+    function forecastHolt(values, daysAhead, alpha=0.40, beta=0.20, phi=0.93) {
+      if (!values.length) return Array(daysAhead).fill(0);
+      const nonZero = values.filter(v => v > 0);
+      if (!nonZero.length) return Array(daysAhead).fill(0);
+      if (values.length === 1) return Array(daysAhead).fill(values[0]);
+
+      // Initialise
+      let L = values[0];
+      let T = values.length > 1 ? (values[values.length - 1] - values[0]) / (values.length - 1) : 0;
+
+      for (let i = 1; i < values.length; i++) {
+        const Lnew = alpha * values[i] + (1 - alpha) * (L + phi * T);
+        const Tnew = beta  * (Lnew - L) + (1 - beta) * phi * T;
+        L = Lnew; T = Tnew;
+      }
+
+      // Project with cumulative damped trend
+      let phiPow = phi;
+      return Array.from({ length: daysAhead }, (_, m) => {
+        const phiSum = m === 0 ? phi : (1 - phi ** (m + 1)) / (1 - phi);
+        return Math.max(0, L + phiSum * T);
+      });
+    }
+
+    // ── Forecast Algorithm B: Adaptive Window Linear Regression ───────────────
+    // Tries multiple recent windows (3→14 days), picks the one with best R²,
+    // effectively finding the most recent stable trend regime.
+    // Returns array of daysAhead daily values.
+    function forecastAdaptive(values, daysAhead) {
+      if (!values.length) return Array(daysAhead).fill(0);
+      if (values.length === 1) return Array(daysAhead).fill(values[0]);
+
+      const windows = [3, 5, 7, 10, 14].filter(w => w <= values.length);
+      let bestSlope = 0, bestIntercept = 0, bestR2 = -Infinity;
+
+      for (const w of windows) {
+        const seg = values.slice(-w);
+        const n   = seg.length;
+        const xMean = (n - 1) / 2;
+        const yMean = seg.reduce((s, v) => s + v, 0) / n;
+        let num = 0, den = 0;
+        for (let i = 0; i < n; i++) { num += (i - xMean) * (seg[i] - yMean); den += (i - xMean) ** 2; }
+        const slope = den !== 0 ? num / den : 0;
+        const intercept = yMean - slope * xMean;
+        // R²
+        const ssRes = seg.reduce((s, v, i) => s + (v - (intercept + slope * i)) ** 2, 0);
+        const ssTot = seg.reduce((s, v) => s + (v - yMean) ** 2, 0);
+        const r2 = ssTot > 1e-9 ? 1 - ssRes / ssTot : 0;
+        if (r2 > bestR2) { bestR2 = r2; bestSlope = slope; bestIntercept = intercept; }
+      }
+
+      // Project forward. lastX = index of last actual value in the winning segment.
+      // We project from lastX+1, lastX+2, ...
+      const bestW = windows.reduce((best, w) => {
+        const seg = values.slice(-w);
+        const n = seg.length, xMean = (n-1)/2, yMean = seg.reduce((s,v)=>s+v,0)/n;
+        let num=0, den=0;
+        for (let i=0;i<n;i++){num+=(i-xMean)*(seg[i]-yMean);den+=(i-xMean)**2;}
+        const slope=den?num/den:0, intercept=yMean-slope*xMean;
+        const ssRes=seg.reduce((s,v,i)=>s+(v-(intercept+slope*i))**2,0);
+        const ssTot=seg.reduce((s,v)=>s+(v-yMean)**2,0);
+        const r2=ssTot>1e-9?1-ssRes/ssTot:0;
+        return r2 > best.r2 ? {w, slope, intercept, n, r2} : best;
+      }, {r2: -Infinity, w: windows[0], slope: 0, intercept: 0, n: windows[0]});
+
+      const lastX = bestW.n - 1;
+      const lastActual = values[values.length - 1];
+
+      return Array.from({ length: daysAhead }, (_, i) => {
+        const dampFactor = Math.exp(-0.025 * i); // gentle damping to prevent divergence
+        const raw = bestW.intercept + bestW.slope * (lastX + i + 1);
+        // Blend: at i=0 very close to raw, then damp toward lastActual
+        const projected = raw * dampFactor + lastActual * (1 - dampFactor);
+        return Math.max(0, projected);
+      });
+    }
+
     function computeSmartDailyRate(dailyCosts) {
       // dailyCosts: array of numbers (oldest → newest), one per day
       if (!dailyCosts.length) return 0;
@@ -1498,7 +1594,7 @@
       );
     }
 
-    function TimeSeriesChart({ records, currency, from, to, days, groupOpt, bucket, setBucket, style, setStyle, forecast, alerts, budget }) {
+    function TimeSeriesChart({ records, currency, from, to, days, groupOpt, bucket, setBucket, style, setStyle, forecast, alerts, budget, forecastMethod }) {
       const dark = useDark();
       const [hiddenSeries, setHiddenSeries] = useState(new Set());
       const [alertPanel, setAlertPanel]     = useState(null); // { x, y, alerts }
@@ -1512,15 +1608,14 @@
 
       const series = useMemo(() => {
         // Both grouped and non-grouped use addForecastToSeries for per-group forecast.
-        // Non-grouped: single "total" group.
         if (!isGrouped) {
-          const flat = buildTimeSeries(records, from, to, bucket, null); // no legacy forecastPoints
+          const flat = buildTimeSeries(records, from, to, bucket, null);
           const gs = { rows: flat, groupNames: ["total"] };
-          return addForecastToSeries(gs, bucket);
+          return addForecastToSeries(gs, bucket, forecastMethod);
         }
         const gs = buildGroupedTimeSeries(records, from, to, bucket, groupOpt.fn, 6);
-        return addForecastToSeries(gs, bucket);
-      }, [records, from, to, bucket, isGrouped, groupOpt && groupOpt.id]);
+        return addForecastToSeries(gs, bucket, forecastMethod);
+      }, [records, from, to, bucket, isGrouped, groupOpt && groupOpt.id, forecastMethod]);
 
       const BUCKET_OPTS = [
         { id: "day",   label: "Daily"   },
@@ -1534,6 +1629,10 @@
         ? { background: "#1f2937", border: "1px solid #374151", borderRadius: 8, fontSize: 12 }
         : { borderRadius: 8, fontSize: 12, border: "1px solid #e2e8f0" };
 
+      // Stable color map — index based on ORIGINAL groupNames order, never changes on toggle
+      const colorMap = Object.fromEntries(
+        series.groupNames.map((g, i) => [g, PALETTE[i % PALETTE.length]])
+      );
       const visibleGroups = series.groupNames.filter(g => !hiddenSeries.has(g));
 
       const toggleSeries = (g) => {
@@ -1657,17 +1756,17 @@
                         label={{ value: "Budget", fill: "#ef4444", fontSize: 10, position: "right" }} />
                     )}
                     {/* Stacked actual areas */}
-                    {series.groupNames.filter(g => !hiddenSeries.has(g)).map((g, i) => (
+                    {series.groupNames.filter(g => !hiddenSeries.has(g)).map(g => (
                       <Area key={g} type="monotone" dataKey={g} stackId="1"
-                        stroke={PALETTE[i % PALETTE.length]} fill={PALETTE[i % PALETTE.length]}
+                        stroke={colorMap[g]} fill={colorMap[g]}
                         fillOpacity={0.5} strokeWidth={1.5}
                         dot={<AlertDot dataKey={g} />} />
                     ))}
                     {/* Per-group dashed forecast lines (not stacked, overlaid) */}
-                    {series.groupNames.map((g, i) =>
+                    {series.groupNames.map(g =>
                       !hiddenSeries.has(g) && series.rows.some(r => r[`${g}_f`] != null) ? (
                         <Line key={`${g}_f`} type="monotone" dataKey={`${g}_f`}
-                          stroke={PALETTE[i % PALETTE.length]} strokeWidth={1.5}
+                          stroke={colorMap[g]} strokeWidth={1.5}
                           strokeDasharray="5 3" strokeOpacity={0.8}
                           dot={false} activeDot={false} legendType="none" connectNulls={true} />
                       ) : null
@@ -1684,17 +1783,17 @@
                         label={{ value: "Budget", fill: "#ef4444", fontSize: 10, position: "right" }} />
                     )}
                     {/* Actual lines */}
-                    {series.groupNames.filter(g => !hiddenSeries.has(g)).map((g, i) => (
+                    {series.groupNames.filter(g => !hiddenSeries.has(g)).map(g => (
                       <Line key={g} type="monotone" dataKey={g}
-                        stroke={isGrouped ? PALETTE[i % PALETTE.length] : "#3b82f6"}
+                        stroke={isGrouped ? colorMap[g] : "#3b82f6"}
                         strokeWidth={2} dot={<AlertDot dataKey={g} />} activeDot={{ r: 4 }}
                         connectNulls={false} />
                     ))}
                     {/* Per-group dashed forecast lines */}
-                    {series.groupNames.map((g, i) =>
+                    {series.groupNames.map(g =>
                       !hiddenSeries.has(g) && series.rows.some(r => r[`${g}_f`] != null) ? (
                         <Line key={`${g}_f`} type="monotone" dataKey={`${g}_f`}
-                          stroke={isGrouped ? PALETTE[i % PALETTE.length] : "#3b82f6"}
+                          stroke={isGrouped ? colorMap[g] : "#3b82f6"}
                           strokeWidth={1.5} strokeDasharray="5 3" strokeOpacity={0.8}
                           dot={false} activeDot={false} legendType="none" connectNulls={true} />
                       ) : null
@@ -1732,15 +1831,15 @@
             {isGrouped && (
               <div className={cx("flex flex-wrap gap-x-3 gap-y-1.5 mt-3 pt-3 border-t",
                 dark ? "border-gray-700" : "border-slate-100")}>
-                {series.groupNames.map((g, i) => {
+                {series.groupNames.map(g => {
                   const hidden = hiddenSeries.has(g);
                   return (
                     <button key={g} onClick={() => toggleSeries(g)}
                       className={cx("flex items-center gap-1.5 text-xs transition-opacity",
                         hidden ? "opacity-35" : "opacity-100",
                         dark ? "text-gray-400 hover:text-gray-200" : "text-slate-600 hover:text-slate-900")}>
-                      <span className="w-2.5 h-2.5 rounded-sm flex-shrink-0 transition-opacity"
-                        style={{ background: hidden ? (dark ? "#4b5563" : "#cbd5e1") : PALETTE[i % PALETTE.length] }} />
+                      <span className="w-2.5 h-2.5 rounded-sm flex-shrink-0"
+                        style={{ background: hidden ? (dark ? "#4b5563" : "#cbd5e1") : colorMap[g] }} />
                       <span className="truncate max-w-[100px]" title={g}>{g}</span>
                     </button>
                   );
@@ -2630,8 +2729,15 @@
 
       // Shared grouping
       const [groupId, setGroupId] = useState("service");
-      const [bucket, setBucket]   = useState(() => defaultBucket(30));
-      const [style, setStyle]     = useState("stacked");
+      const [bucket, setBucket]     = useState(() => defaultBucket(30));
+      const [style, setStyle]       = useState("stacked");
+      const [forecastMethod, setForecastMethod] = useState(() => {
+        try { return localStorage.getItem("forecastMethod") || "holt"; } catch { return "holt"; }
+      });
+      const setAndSaveForecastMethod = (m) => {
+        setForecastMethod(m);
+        try { localStorage.setItem("forecastMethod", m); } catch {}
+      };
 
       useEffect(() => { setBucket(defaultBucket(days)); }, [days]);
 
@@ -2786,6 +2892,18 @@
                       {data.currency}
                     </span>
                   )}
+                  {/* Forecast method toggle */}
+                  <div className={cx("flex gap-0.5 rounded-md p-0.5 border flex-shrink-0", segBg)}
+                    title="Forecast algorithm">
+                    {[["holt","H"],["adaptive","A"]].map(([m, label]) => (
+                      <button key={m} onClick={() => setAndSaveForecastMethod(m)}
+                        className={cx("text-xs px-1.5 py-1 rounded font-semibold transition-colors",
+                          forecastMethod === m ? segAct : segIn)}
+                        title={m === "holt" ? "Holt damped trend" : "Adaptive window"}>
+                        {label}
+                      </button>
+                    ))}
+                  </div>
                   <button onClick={() => load(true)} disabled={loading}
                     className={cx("text-xs px-2 py-1 rounded border font-medium flex items-center gap-1 transition-colors",
                       dark ? "border-gray-600 text-gray-400 hover:bg-gray-700" : "border-slate-200 text-slate-600 hover:bg-slate-50")}>
@@ -2898,6 +3016,7 @@
                       forecast={forecast}
                       alerts={alerts}
                       budget={totalBudget}
+                      forecastMethod={forecastMethod}
                     />
                     <MoversCard records={data.records} days={days} currency={data.currency} groupOpt={groupOpt} />
                     <GroupChart records={data.records} currency={data.currency} groupOpt={groupOpt} />
