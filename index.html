@@ -310,6 +310,51 @@
         .sort((a, b) => a.name.localeCompare(b.name));
     }
 
+    // Fetch CPU + network metrics for a VM resource over the last 7 days.
+    // resourceId: full ARM path e.g. /subscriptions/.../providers/Microsoft.Compute/virtualMachines/name
+    async function fetchVmMetrics(resourceId, at) {
+      const to   = new Date().toISOString();
+      const from = new Date(Date.now() - 7 * 86400000).toISOString();
+      const url  = `${resourceId}/providers/microsoft.insights/metrics`
+                 + `?api-version=2018-01-01`
+                 + `&metricnames=${encodeURIComponent("Percentage CPU,Network In Total,Network Out Total")}`
+                 + `&timespan=${encodeURIComponent(from + "/" + to)}`
+                 + `&interval=P1D`
+                 + `&aggregation=Average`;
+      try {
+        const j = await armGet(url, at);
+        const getAvg = (metricName) => {
+          const m = (j.value || []).find(v => v.name?.value === metricName);
+          if (!m || !m.timeseries?.[0]?.data?.length) return null;
+          const vals = m.timeseries[0].data.map(d => d.average).filter(v => v != null);
+          return vals.length ? vals.reduce((s, v) => s + v, 0) / vals.length : null;
+        };
+        return {
+          avgCpu7d:     getAvg("Percentage CPU")   ?? 0,
+          avgNetwork7d: (getAvg("Network In Total") ?? 0) + (getAvg("Network Out Total") ?? 0)
+        };
+      } catch { return null; }
+    }
+
+    // Fetch metrics for all VMs found in records. Returns { [resourceName]: metrics }.
+    async function fetchAllVmMetrics(records, at, onProgress) {
+      const vms = {};
+      for (const r of records) {
+        if (r.service === "Microsoft.Compute" && r.resourceId && !vms[r.resourceName]) {
+          vms[r.resourceName] = r.resourceId;
+        }
+      }
+      const result = {};
+      const names = Object.keys(vms);
+      for (let i = 0; i < names.length; i++) {
+        const name = names[i];
+        if (onProgress) onProgress(`Fetching metrics: ${name} (${i+1}/${names.length})…`);
+        const m = await fetchVmMetrics(vms[name], at);
+        if (m) result[name] = m;
+      }
+      return result;
+    }
+
     async function fetchUsageDetails(subId, from, to, at, onProgress) {
       const filter = `properties/usageStart ge '${from}' and properties/usageEnd le '${to}'`;
       let url = `/subscriptions/${subId}/providers/Microsoft.Consumption/usageDetails`
@@ -1497,15 +1542,27 @@
                 {rows.length === 0 && (
                   <tr><td colSpan={3} className={cx("px-4 py-8 text-center text-sm", dark ? "text-gray-500" : "text-slate-400")}>No results</td></tr>
                 )}
-                {rows.slice(0, 100).map((r, i) => (
-                  <tr key={i} className={cx("transition-colors", dark ? "hover:bg-gray-700" : "hover:bg-slate-50")}>
-                    <td className={cx("px-4 py-2.5 font-medium max-w-[200px] truncate", dark ? "text-gray-200" : "text-slate-900")} title={r.name}>{r.name}</td>
-                    <td className={cx("px-4 py-2.5 text-right tabular-nums", dark ? "text-gray-200" : "text-slate-900")}>{fmt(r.cost, currency)}</td>
-                    <td className={cx("px-4 py-2.5 text-right tabular-nums hidden sm:table-cell", dark ? "text-gray-500" : "text-slate-400")}>
-                      {total > 0 ? ((r.cost / total) * 100).toFixed(1) + "%" : "—"}
-                    </td>
-                  </tr>
-                ))}
+                {rows.slice(0, 100).map((r, i) => {
+                  // Check if this item has a custom threshold override
+                  const overrideKey = `thresholds:${groupOpt.id === "service" ? "service" : groupOpt.id === "resourceGroup" ? "rg" : groupOpt.id === "location" ? "location" : "resource"}:${r.name}`;
+                  const rowHasOverride = kv.get(overrideKey) !== null;
+                  return (
+                    <tr key={i} className={cx("transition-colors", dark ? "hover:bg-gray-700" : "hover:bg-slate-50")}>
+                      <td className={cx("px-4 py-2.5 font-medium max-w-[200px]", dark ? "text-gray-200" : "text-slate-900")} title={r.name}>
+                        <div className="flex items-center gap-1.5 min-w-0">
+                          <span className="truncate">{r.name}</span>
+                          {rowHasOverride && (
+                            <span title="Custom threshold set" className="w-1.5 h-1.5 rounded-full bg-blue-500 flex-shrink-0" />
+                          )}
+                        </div>
+                      </td>
+                      <td className={cx("px-4 py-2.5 text-right tabular-nums", dark ? "text-gray-200" : "text-slate-900")}>{fmt(r.cost, currency)}</td>
+                      <td className={cx("px-4 py-2.5 text-right tabular-nums hidden sm:table-cell", dark ? "text-gray-500" : "text-slate-400")}>
+                        {total > 0 ? ((r.cost / total) * 100).toFixed(1) + "%" : "—"}
+                      </td>
+                    </tr>
+                  );
+                })}
               </tbody>
             </table>
             {rows.length > 100 && (
@@ -1905,55 +1962,256 @@
       );
     }
 
+    // ── Small icon buttons used in the drill-down list ──────────────────────
+    function IconBtn({ title, onClick, children, danger, muted: isMuted }) {
+      const dark = useDark();
+      return (
+        <button title={title} onClick={onClick}
+          className={cx("w-7 h-7 flex items-center justify-center rounded-md transition-colors flex-shrink-0",
+            danger ? (dark ? "text-red-400 hover:bg-red-950" : "text-red-500 hover:bg-red-50")
+            : isMuted ? (dark ? "text-gray-600 hover:text-gray-400 hover:bg-gray-700" : "text-slate-300 hover:text-slate-500 hover:bg-slate-100")
+            : (dark ? "text-gray-400 hover:bg-gray-700 hover:text-gray-200" : "text-slate-500 hover:bg-slate-100 hover:text-slate-700")
+          )}>
+          {children}
+        </button>
+      );
+    }
+
+    // Inline edit form that expands below a row
+    function InlineThresholdEdit({ thresholdKey, initialValues, currency, onSave, onCancel }) {
+      const dark = useDark();
+      const [values, setValues] = useState({ ...initialValues });
+      const [saved, setSaved]   = useState(false);
+      const save = () => {
+        kv.set(thresholdKey, { ...values, enabled: true });
+        setSaved(true);
+        setTimeout(() => { setSaved(false); onSave(); }, 800);
+      };
+      const bg  = dark ? "bg-gray-900 border-gray-700" : "bg-slate-50 border-slate-200";
+      return (
+        <div className={cx("px-4 py-3 border-t", bg, dark ? "border-gray-700" : "border-slate-100")}>
+          <ThresholdFields values={values} onChange={setValues} currency={currency} />
+          <div className="flex justify-between mt-3">
+            <button onClick={onCancel}
+              className={cx("text-xs px-3 py-1.5 rounded border font-medium",
+                dark ? "border-gray-600 text-gray-400 hover:bg-gray-700" : "border-slate-200 text-slate-600 hover:bg-slate-50")}>
+              Cancel
+            </button>
+            <button onClick={save}
+              className="text-xs px-3 py-1.5 rounded bg-blue-600 text-white font-medium hover:bg-blue-700">
+              {saved ? "✓ Saved" : "Save override"}
+            </button>
+          </div>
+        </div>
+      );
+    }
+
+    // A single row in the drill-down list
+    function DrillRow({ item, currency, editingKey, onEdit, onReset, onDrill, dark }) {
+      const isEditing = editingKey === item.key;
+      const changePct = item.changePct;
+      const overrideActive = item.hasOverride;
+      const text  = dark ? "text-gray-100" : "text-slate-900";
+      const muted = dark ? "text-gray-500" : "text-slate-400";
+      const divider = dark ? "border-gray-700" : "border-slate-100";
+      const rowBg   = dark ? "hover:bg-gray-700" : "hover:bg-slate-50";
+
+      // Threshold display: compact "A$50 | 25%"
+      const t = item.threshold;
+      const threshStr = `${fmt(t.absoluteMonthly, currency)} | ${t.momPct}%`;
+      const tierStr = t.tierAbsolute === t.tierPct ? t.tierAbsolute : `${t.tierAbsolute}/${t.tierPct}`;
+
+      return (
+        <>
+          <div className={cx("flex items-center gap-2 px-3 py-2.5 border-b transition-colors", divider, rowBg)}>
+            {/* Drill arrow (only on service/rg level) */}
+            {onDrill && (
+              <button onClick={onDrill} className={cx("flex-shrink-0", muted, "hover:text-blue-500")}>
+                <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.5" strokeLinecap="round"><path d="M9 18l6-6-6-6"/></svg>
+              </button>
+            )}
+
+            {/* Name */}
+            <div className="flex-1 min-w-0">
+              <div className={cx("text-xs font-semibold truncate", text)} title={item.name}>{item.name}</div>
+              <div className={cx("text-xs truncate", muted)}>
+                {threshStr}
+                <span className={cx("ml-1.5 text-xs", tierStr === "watch" ? "text-blue-500" : tierStr === "warning" ? "text-amber-500" : "text-red-500")}>
+                  {tierStr}
+                </span>
+                {overrideActive && <span className="ml-1.5 text-blue-400">●</span>}
+              </div>
+            </div>
+
+            {/* Cost */}
+            <div className="text-right flex-shrink-0">
+              <div className={cx("text-xs font-bold tabular-nums", text)}>{fmt(item.cost, currency)}</div>
+              {changePct != null && (
+                <div className={cx("text-xs tabular-nums font-medium",
+                  changePct > 10 ? (dark ? "text-rose-400" : "text-rose-600")
+                  : changePct < -5 ? (dark ? "text-emerald-400" : "text-emerald-600")
+                  : muted)}>
+                  {changePct > 0 ? "▲" : "▼"}{Math.abs(changePct).toFixed(0)}%
+                </div>
+              )}
+            </div>
+
+            {/* Action icons */}
+            <div className="flex items-center gap-0.5 flex-shrink-0">
+              <IconBtn title="Set threshold" onClick={() => onEdit(item)}>
+                <svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round"><path d="M11 4H4a2 2 0 0 0-2 2v14a2 2 0 0 0 2 2h14a2 2 0 0 0 2-2v-7"/><path d="M18.5 2.5a2.121 2.121 0 0 1 3 3L12 15l-4 1 1-4 9.5-9.5z"/></svg>
+              </IconBtn>
+              <IconBtn title="Reset to global default" onClick={() => onReset(item)} isMuted={!overrideActive} danger={false}>
+                <svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round"><path d="M3 12a9 9 0 1 0 9-9 9.75 9.75 0 0 0-6.74 2.74L3 8"/><path d="M3 3v5h5"/></svg>
+              </IconBtn>
+            </div>
+          </div>
+
+          {/* Inline edit form */}
+          {isEditing && (
+            <InlineThresholdEdit
+              thresholdKey={item.key}
+              initialValues={item.threshold}
+              currency={currency}
+              onSave={onEdit.bind(null, null)}
+              onCancel={() => onEdit(null)}
+            />
+          )}
+        </>
+      );
+    }
+
     function AlertsTab({ records, currency }) {
       const dark = useDark();
-      const [overrides, setOverrides] = useState(() => listOverrides());
-      const [editing, setEditing]     = useState(null);
-      const bg    = dark ? "bg-gray-800 border-gray-700" : "bg-white border-slate-200";
-      const hdr   = dark ? "text-gray-100" : "text-slate-900";
-      const muted = dark ? "text-gray-400" : "text-slate-500";
+      const [drillService, setDrillService] = useState(null);
+      const [editingKey, setEditingKey]     = useState(null);
+      const [refreshKey, setRefreshKey]     = useState(0);
+      const [showGlobal, setShowGlobal]     = useState(false);
 
-      const refresh = () => setOverrides(listOverrides());
+      const refresh = () => { setRefreshKey(k => k + 1); setEditingKey(null); };
 
-      const handleDelete = (key) => {
-        kv.del(key);
+      const bg     = dark ? "bg-gray-800 border-gray-700" : "bg-white border-slate-200";
+      const hdr    = dark ? "text-gray-100" : "text-slate-900";
+      const muted  = dark ? "text-gray-400" : "text-slate-500";
+      const divider= dark ? "border-gray-700" : "border-slate-100";
+      const filBg  = dark ? "bg-gray-800" : "bg-white";
+
+      // Build rows for current drill level
+      const rows = useMemo(() => {
+        if (!records.length) return [];
+        const half = new Date(); half.setUTCDate(half.getUTCDate() - 15);
+        const halfIso = half.toISOString().slice(0, 10);
+        const map = {};
+
+        for (const r of records) {
+          const isService = drillService === null;
+          const groupKey  = isService ? r.service : r.resourceName;
+          if (!isService && r.service !== drillService) continue;
+          if (!map[groupKey]) map[groupKey] = {
+            name: groupKey, service: r.service, rg: r.resourceGroup,
+            location: r.location, cost: 0, recent: 0, prior: 0, resourceId: r.resourceId
+          };
+          map[groupKey].cost += r.cost;
+          if (r.date >= halfIso) map[groupKey].recent += r.cost;
+          else map[groupKey].prior += r.cost;
+        }
+
+        return Object.values(map).sort((a, b) => b.cost - a.cost).map(item => {
+          const isService = drillService === null;
+          const key = isService
+            ? `thresholds:service:${item.name}`
+            : `thresholds:resource:${item.name}`;
+          const rawThreshold = kv.get(key);
+          const threshold = rawThreshold ? JSON.parse(rawThreshold) : ensureGlobalThreshold();
+          return {
+            ...item,
+            key,
+            changePct: item.prior > 0.01 ? ((item.recent - item.prior) / item.prior) * 100 : null,
+            threshold,
+            hasOverride: rawThreshold !== null,
+          };
+        });
+      }, [records, drillService, refreshKey]);
+
+      const handleEdit = (item) => {
+        if (!item) { setEditingKey(null); return; }
+        setEditingKey(editingKey === item.key ? null : item.key);
+      };
+
+      const handleReset = (item) => {
+        kv.del(item.key);
         refresh();
       };
 
-      return (
-        <div className="space-y-4">
-          {/* Section A: Global defaults */}
-          <GlobalDefaultsSection currency={currency} onSaved={refresh} />
+      const totalAlertCount = rows.filter(r => r.hasOverride).length;
 
-          {/* Section B: Active overrides */}
+      return (
+        <div className="space-y-3">
+          {/* Global defaults — collapsible */}
           <div className={cx("rounded-xl border shadow-sm overflow-hidden", bg)}>
-            <div className={cx("px-4 py-3 border-b", dark ? "border-gray-700" : "border-slate-100")}>
-              <span className={cx("text-sm font-semibold", hdr)}>Active overrides</span>
-              {overrides.length > 0 && (
-                <span className={cx("text-xs ml-2", muted)}>{overrides.length} override{overrides.length !== 1 ? "s" : ""}</span>
-              )}
-            </div>
-            {overrides.length === 0
-              ? <div className={cx("px-4 py-6 text-sm text-center", muted)}>
-                  No overrides set. All resources use the global defaults above.
-                </div>
-              : <div>
-                  {overrides.map((o, i) => (
-                    <OverrideRow key={i} override={o} dark={dark}
-                      onEdit={ov => setEditing(ov)}
-                      onDelete={key => { handleDelete(key); setEditing(null); }} />
-                  ))}
-                </div>
-            }
+            <button onClick={() => setShowGlobal(v => !v)}
+              className={cx("w-full flex items-center justify-between px-4 py-3 transition-colors text-left",
+                dark ? "hover:bg-gray-700" : "hover:bg-slate-50")}>
+              <div>
+                <span className={cx("text-sm font-semibold", hdr)}>Global defaults</span>
+                <span className={cx("text-xs ml-2", muted)}>applies to all unless overridden</span>
+              </div>
+              <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.5"
+                strokeLinecap="round" className={cx(muted, "transition-transform", showGlobal ? "" : "-rotate-90")}>
+                <path d="M6 9l6 6 6-6"/>
+              </svg>
+            </button>
+            {showGlobal && (
+              <div className={cx("border-t", divider)}>
+                <GlobalDefaultsSection currency={currency} onSaved={refresh} />
+              </div>
+            )}
           </div>
 
-          {/* Section C: Add / edit override */}
-          <AddOverrideSection
-            records={records} currency={currency}
-            editingOverride={editing}
-            onCancelEdit={() => setEditing(null)}
-            onSaved={() => { refresh(); setEditing(null); }}
-          />
+          {/* Drill-down list */}
+          <div className={cx("rounded-xl border shadow-sm overflow-hidden", bg)}>
+            {/* Header row: breadcrumb + override count */}
+            <div className={cx("px-3 py-2.5 border-b flex items-center gap-2", divider)}>
+              {drillService ? (
+                <button onClick={() => { setDrillService(null); setEditingKey(null); }}
+                  className={cx("flex items-center gap-1 text-xs font-medium transition-colors",
+                    dark ? "text-blue-400 hover:text-blue-300" : "text-blue-600 hover:text-blue-700")}>
+                  <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.5" strokeLinecap="round"><path d="M15 18l-6-6 6-6"/></svg>
+                  All services
+                </button>
+              ) : null}
+              <span className={cx("text-xs font-semibold", hdr)}>
+                {drillService ? `${drillService} · resources` : "Services"}
+              </span>
+              {totalAlertCount > 0 && (
+                <span className={cx("text-xs ml-auto", muted)}>{totalAlertCount} override{totalAlertCount !== 1 ? "s" : ""}</span>
+              )}
+            </div>
+
+            {/* Column headers */}
+            <div className={cx("flex items-center gap-2 px-3 py-1 border-b text-xs font-medium",
+              dark ? "bg-gray-900 border-gray-700 text-gray-500" : "bg-slate-50 border-slate-100 text-slate-400")}>
+              <div className="w-3 flex-shrink-0" />
+              <div className="flex-1">Name · Threshold</div>
+              <div className="w-16 text-right flex-shrink-0">Cost</div>
+              <div className="w-14 flex-shrink-0" />
+            </div>
+
+            {/* Rows */}
+            {records.length === 0 && (
+              <div className={cx("px-4 py-8 text-sm text-center", muted)}>
+                Load cost data first to configure thresholds.
+              </div>
+            )}
+            {rows.map((item, i) => (
+              <DrillRow key={i} item={item} currency={currency}
+                editingKey={editingKey} dark={dark}
+                onEdit={handleEdit}
+                onReset={handleReset}
+                onDrill={drillService === null ? () => { setDrillService(item.name); setEditingKey(null); } : null}
+              />
+            ))}
+          </div>
         </div>
       );
     }
@@ -1978,15 +2236,47 @@
 
       useEffect(() => { setBucket(defaultBucket(days)); }, [days]);
 
+      // metricsData: { [resourceName]: { avgCpu7d, avgNetwork7d } }
+      // Populated from test data immediately, or from Monitor API after cost load.
+      const [metricsData, setMetricsData]   = useState({});
+      const [metricsStatus, setMetricsStatus] = useState(""); // "" | "loading" | "done" | "error"
+
       const load = useCallback(async (force = false) => {
-        if (testMode) { setData(generateTestData(days)); setLoading(false); return; }
+        if (testMode) {
+          const td = generateTestData(days);
+          setData(td);
+          setMetricsData(td.metrics || {});
+          setLoading(false);
+          return;
+        }
         setError(null); setLoading(true); setProgress("Loading…");
+        setMetricsData({}); setMetricsStatus("");
         try {
           const result = await getCostData(selected, allSubs, days, msg => setProgress(msg), force);
           setData(result);
         } catch (e) { setError(e.message); }
         finally { setLoading(false); setProgress(""); }
       }, [selected, allSubs, days, testMode]);
+
+      // After cost data loads (real mode), fetch VM metrics in background
+      useEffect(() => {
+        if (!data || data.isTest || metricsStatus === "loading" || metricsStatus === "done") return;
+        const vms = data.records.filter(r => r.service === "Microsoft.Compute" && r.resourceId);
+        if (vms.length === 0) return;
+        setMetricsStatus("loading");
+        (async () => {
+          try {
+            const at = await ensureValidToken();
+            const m  = await fetchAllVmMetrics(data.records, at,
+              msg => setProgress(msg));
+            setMetricsData(m);
+            setMetricsStatus("done");
+          } catch (e) {
+            console.warn("Metrics fetch failed:", e);
+            setMetricsStatus("error");
+          } finally { setProgress(""); }
+        })();
+      }, [data]);
 
       useEffect(() => { load(false); }, [load]);
 
@@ -2004,8 +2294,8 @@
       const alerts = useMemo(() => {
         if (!data || !data.records.length) return [];
         ensureGlobalThreshold();
-        return runIntelligence(data.records, data.metrics || {}, days);
-      }, [data, days]);
+        return runIntelligence(data.records, metricsData, days);
+      }, [data, metricsData, days]);
 
       const forecast = useMemo(() => data ? projectMonthEnd(data.records, data.currency) : null, [data]);
 
@@ -2065,34 +2355,7 @@
               </div>
             </div>
 
-            {/* Row 2: Tab bar */}
-            <div className={cx("border-t px-4", dark ? "border-gray-700" : "border-slate-100")}>
-              <div className="max-w-5xl mx-auto flex gap-0">
-                {[
-                  { id: "home",   label: "Dashboard",
-                    badge: null },
-                  { id: "alerts", label: "Alerts",
-                    badge: alerts.filter(a => a.tier === "critical" || a.tier === "warning").length || null }
-                ].map(tab => (
-                  <button key={tab.id} onClick={() => setActiveTab(tab.id)}
-                    className={cx(
-                      "flex items-center gap-1.5 px-4 py-2.5 text-xs font-semibold border-b-2 transition-colors",
-                      activeTab === tab.id
-                        ? (dark ? "border-blue-400 text-blue-400" : "border-blue-600 text-blue-600")
-                        : (dark ? "border-transparent text-gray-400 hover:text-gray-200" : "border-transparent text-slate-500 hover:text-slate-700")
-                    )}>
-                    {tab.label}
-                    {tab.badge > 0 && (
-                      <span className="text-xs px-1.5 py-0.5 rounded-full bg-red-500 text-white font-bold leading-none">
-                        {tab.badge}
-                      </span>
-                    )}
-                  </button>
-                ))}
-              </div>
-            </div>
-
-            {/* Row 3: Filter bar — Home tab only */}
+            {/* Filter bar — Home tab only */}
             {activeTab === "home" && (
               <div className={cx("border-t px-4 py-2 space-y-2", filBg)}>
                 <div className="flex items-center gap-2">
@@ -2130,7 +2393,7 @@
           </div>
 
           {/* ── Page content ──────────────────────────────────────────────────── */}
-          <div className="max-w-5xl mx-auto px-4 py-4 space-y-4">
+          <div className="max-w-5xl mx-auto px-4 py-4 pb-24 space-y-4">
 
             {/* ── ALERTS TAB ─────────────────────────────────────────────────── */}
             {activeTab === "alerts" && (
@@ -2195,6 +2458,61 @@
                 )}
               </>
             )}
+          </div>
+          {/* ── Bottom tab bar (fixed) ──────────────────────────────────────── */}
+          <div className={cx(
+            "fixed bottom-0 left-0 right-0 z-30 border-t",
+            dark ? "bg-gray-900 border-gray-700" : "bg-white border-slate-200"
+          )} style={{ paddingBottom: "env(safe-area-inset-bottom, 0px)" }}>
+            <div className="max-w-5xl mx-auto flex">
+              {[
+                {
+                  id: "home", label: "Dashboard",
+                  badge: 0,
+                  icon: (active) => (
+                    <svg width="22" height="22" viewBox="0 0 24 24" fill="none"
+                      stroke={active ? "#3b82f6" : (dark ? "#6b7280" : "#94a3b8")}
+                      strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
+                      <rect x="3" y="3" width="7" height="7" rx="1"/>
+                      <rect x="14" y="3" width="7" height="7" rx="1"/>
+                      <rect x="3" y="14" width="7" height="7" rx="1"/>
+                      <rect x="14" y="14" width="7" height="7" rx="1"/>
+                    </svg>
+                  )
+                },
+                {
+                  id: "alerts", label: "Alerts",
+                  badge: alerts.filter(a => a.tier === "critical" || a.tier === "warning").length,
+                  icon: (active) => (
+                    <svg width="22" height="22" viewBox="0 0 24 24" fill="none"
+                      stroke={active ? "#3b82f6" : (dark ? "#6b7280" : "#94a3b8")}
+                      strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
+                      <path d="M18 8A6 6 0 0 0 6 8c0 7-3 9-3 9h18s-3-2-3-9"/>
+                      <path d="M13.73 21a2 2 0 0 1-3.46 0"/>
+                    </svg>
+                  )
+                }
+              ].map(tab => {
+                const active = activeTab === tab.id;
+                return (
+                  <button key={tab.id} onClick={() => setActiveTab(tab.id)}
+                    className="flex-1 flex flex-col items-center justify-center py-2.5 gap-0.5 relative transition-colors">
+                    <div className="relative">
+                      {tab.icon(active)}
+                      {tab.badge > 0 && (
+                        <span className="absolute -top-1 -right-1 min-w-[16px] h-4 flex items-center justify-center rounded-full bg-red-500 text-white text-xs font-bold px-0.5 leading-none">
+                          {tab.badge}
+                        </span>
+                      )}
+                    </div>
+                    <span className={cx("text-xs font-medium transition-colors",
+                      active ? "text-blue-500" : (dark ? "text-gray-500" : "text-slate-400"))}>
+                      {tab.label}
+                    </span>
+                  </button>
+                );
+              })}
+            </div>
           </div>
         </div>
         </DarkCtx.Provider>
